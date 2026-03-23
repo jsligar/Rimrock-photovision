@@ -111,6 +111,8 @@ const PHASE_DEFS = [
 
 let autoRefreshTimer = null;
 let statusData = null;
+let _prevProgress = {};
+let _etaCache = {};
 const TAB_LABELS = {
   dashboard: 'Dashboard',
   clusters: 'Cluster Review',
@@ -196,8 +198,63 @@ function renderPhaseGrid(phases, counts) {
   });
 }
 
+function _fmtEta(minutes) {
+  if (!Number.isFinite(minutes) || minutes < 0) return '-';
+  if (minutes < 1) return '<1m';
+  const h = Math.floor(minutes / 60);
+  const m = Math.round(minutes % 60);
+  if (h <= 0) return `${m}m`;
+  if (m === 0) return `${h}h`;
+  return `${h}h ${m}m`;
+}
+
+function _updateEtaCache(phases) {
+  const now = Date.now();
+  const nextPrev = {};
+  const nextEta = {};
+
+  phases.forEach(p => {
+    nextPrev[p.phase] = { current: p.progress_current || 0, t: now };
+
+    if (p.status !== 'running' || !p.progress_total || p.progress_total <= 0) return;
+
+    const prev = _prevProgress[p.phase];
+    if (!prev) return;
+
+    const deltaItems = (p.progress_current || 0) - (prev.current || 0);
+    const deltaMin = (now - prev.t) / 60000;
+    if (deltaItems <= 0 || deltaMin <= 0) return;
+
+    const ratePerMin = deltaItems / deltaMin;
+    if (!Number.isFinite(ratePerMin) || ratePerMin <= 0) return;
+
+    const remaining = Math.max(0, (p.progress_total || 0) - (p.progress_current || 0));
+    const etaMinutes = remaining / ratePerMin;
+    const pct = p.progress_total > 0
+      ? Math.round(((p.progress_current || 0) / p.progress_total) * 100)
+      : 0;
+
+    nextEta[p.phase] = {
+      ratePerMin,
+      etaMinutes,
+      pct,
+      current: p.progress_current || 0,
+      total: p.progress_total || 0,
+      updatedAt: now,
+    };
+  });
+
+  _prevProgress = nextPrev;
+  _etaCache = nextEta;
+}
+
 function _phaseCountLine(id, p, counts) {
   if (!counts) return `${fmt(p.progress_current)} / ${fmt(p.progress_total)}`;
+
+  const eta = _etaCache[id];
+  const etaSuffix = (p.status === 'running' && eta)
+    ? ` | ~${Math.round(eta.ratePerMin)}/min | ETA ~${_fmtEta(eta.etaMinutes)}`
+    : '';
 
   switch (id) {
     case 'pull':
@@ -205,20 +262,20 @@ function _phaseCountLine(id, p, counts) {
         const pulled = p.progress_total || p.progress_current || 0;
         const total = counts.total_photos || 0;
         if (pulled > 0 && total > 0 && pulled !== total) {
-          return `${fmt(pulled)} pulled | ${fmt(total)} total`;
+          return `${fmt(pulled)} pulled | ${fmt(total)} total${etaSuffix}`;
         }
-        return `${fmt(total || pulled)} photos`;
+        return `${fmt(total || pulled)} photos${etaSuffix}`;
       }
     case 'process':
-      return `${fmt(counts.total_photos)} photos | ${fmt(counts.total_faces)} faces`;
+      return `${fmt(counts.total_photos)} photos | ${fmt(counts.total_faces)} faces${etaSuffix}`;
     case 'cluster':
-      return `${fmt(counts.total_clusters)} clusters | ${fmt(counts.labeled_clusters)} labeled`;
+      return `${fmt(counts.total_clusters)} clusters | ${fmt(counts.labeled_clusters)} labeled${etaSuffix}`;
     case 'organize':
-      return `${fmt(counts.photos_organized)} organized`;
+      return `${fmt(counts.photos_organized)} organized${etaSuffix}`;
     case 'tag':
-      return `${fmt(counts.total_detections)} detections`;
+      return `${fmt(counts.total_detections)} detections${etaSuffix}`;
     default:
-      return `${fmt(p.progress_current)} / ${fmt(p.progress_total)}`;
+      return `${fmt(p.progress_current)} / ${fmt(p.progress_total)}${etaSuffix}`;
   }
 }
 
@@ -248,6 +305,7 @@ async function refreshStatus() {
   try {
     const data = await api('/status');
     statusData = data;
+    _updateEtaCache(data.phases);
 
     renderPhaseGrid(data.phases, data.counts);
     updateHeaderStatus(data.phases);
