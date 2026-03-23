@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import config
 import db
 from pipeline.logger import get_logger
+from pipeline import shutdown
 
 log = get_logger("phase4_organize")
 
@@ -71,6 +72,11 @@ def run_organize() -> bool:
     errors = 0
 
     for row in photos:
+        if shutdown.is_requested():
+            log.info("Graceful shutdown: stopping organize after %d photos.", done)
+            db.mark_phase_error("organize", f"Stopped by user after {done} photos")
+            return False
+
         photo_id = row["photo_id"]
         source_rel = row["source_path"]
         filename = row["filename"]
@@ -113,7 +119,6 @@ def run_organize() -> bool:
 
     db.update_phase_progress("organize", done, total)
     log.info("Organize complete. Done: %d, Errors: %d", done, errors)
-
     db.mark_phase_complete("organize")
     return True
 

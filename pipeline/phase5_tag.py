@@ -9,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import config
 import db
 from pipeline.logger import get_logger
+from pipeline import shutdown
 
 log = get_logger("phase5_tag")
 
@@ -36,6 +37,12 @@ def run_tag() -> bool:
     errors = 0
 
     for row in photos:
+        if shutdown.is_requested():
+            log.info("Graceful shutdown: stopping tag after %d photos.", done)
+            conn.close()
+            db.mark_phase_error("tag", f"Stopped by user after {done} photos")
+            return False
+
         photo_id = row["photo_id"]
         dest_rel = row["dest_path"]
         dest_path = config.OUTPUT_DIR / dest_rel

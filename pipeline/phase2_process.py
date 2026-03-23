@@ -18,17 +18,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import config
 import db
 from pipeline.logger import get_logger
+from pipeline import shutdown
 
 log = get_logger("phase2_process")
 
-# Global shutdown flag for graceful stop
-shutdown_requested = False
-
 
 def _handle_signal(signum, frame):
-    global shutdown_requested
     log.info("Shutdown signal received. Finishing current photo then exiting...")
-    shutdown_requested = True
+    shutdown.request()
 
 
 def _now() -> str:
@@ -280,6 +277,17 @@ def run_process() -> bool:
         all_photos.extend(config.ORIGINALS_DIR.rglob(f"*{ext}"))
         all_photos.extend(config.ORIGINALS_DIR.rglob(f"*{ext.upper()}"))
 
+    raw_files: list = []
+    for ext in config.RAW_EXTENSIONS:
+        raw_files.extend(config.ORIGINALS_DIR.rglob(f"*{ext}"))
+        raw_files.extend(config.ORIGINALS_DIR.rglob(f"*{ext.upper()}"))
+    if raw_files:
+        log.warning(
+            "Found %d RAW file(s) — skipping (not supported). "
+            "Convert to JPEG/TIFF first if you want them processed.",
+            len(raw_files),
+        )
+
     total = len(all_photos)
     log.info("Found %d images to process (%d already done)", total, len(processed_paths))
     db.update_phase_progress("process", len(processed_paths), total)
@@ -288,17 +296,12 @@ def run_process() -> bool:
     errors = 0
 
     for photo_path in all_photos:
-        if shutdown_requested:
+        if shutdown.is_requested():
             log.info("Graceful shutdown: stopping after %d photos.", processed_count)
             break
 
         rel_path = str(photo_path.relative_to(config.ORIGINALS_DIR))
         if rel_path in processed_paths:
-            continue
-
-        # Skip RAW files
-        if photo_path.suffix.lower() in config.RAW_EXTENSIONS:
-            log.warning("Skipping RAW file: %s", rel_path)
             continue
 
         try:
@@ -322,12 +325,12 @@ def run_process() -> bool:
     db.update_phase_progress("process", processed_count, total)
     log.info("Process phase complete. Processed: %d, Errors: %d", processed_count, errors)
 
-    if not shutdown_requested:
+    if not shutdown.is_requested():
         db.mark_phase_complete("process")
     else:
         db.mark_phase_error("process", f"Stopped by user after {processed_count} photos")
 
-    return not shutdown_requested
+    return not shutdown.is_requested()
 
 
 def _process_single_photo(

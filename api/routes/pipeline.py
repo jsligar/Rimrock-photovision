@@ -4,6 +4,7 @@ import threading
 from fastapi import APIRouter, HTTPException
 
 import db
+from pipeline import shutdown
 
 router = APIRouter()
 
@@ -15,6 +16,7 @@ _lock = threading.Lock()
 
 def _phase_runner(phase: str) -> None:
     global _running_phase
+    shutdown.clear()
     try:
         if phase == "preflight":
             from pipeline.phase0_preflight import run_preflight
@@ -78,14 +80,21 @@ def run_phase(phase: str):
 @router.post("/pipeline/stop")
 def stop_pipeline():
     """Request graceful shutdown of the running phase."""
-    import signal
-    import os
-
-    # Set shutdown flag in process module if running
-    try:
-        from pipeline import phase2_process
-        phase2_process.shutdown_requested = True
-    except Exception:
-        pass
-
+    shutdown.request()
     return {"requested": "stop"}
+
+
+@router.get("/pipeline/log-tail")
+def log_tail(lines: int = 50):
+    """Return the last N lines of the pipeline log file."""
+    import config as _config
+    log_path = _config.LOG_PATH
+    if not log_path.exists():
+        return {"lines": []}
+    try:
+        with open(log_path, "r", errors="replace") as f:
+            all_lines = f.readlines()
+        tail = [l.rstrip("\n") for l in all_lines[-lines:]]
+        return {"lines": tail}
+    except Exception as e:
+        return {"lines": [], "error": str(e)}

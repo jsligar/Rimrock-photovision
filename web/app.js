@@ -207,14 +207,18 @@ function clearAutoRefresh() {
 
 async function updateLogTail() {
   try {
-    const r = await fetch('/api/../log-tail');  // served via custom endpoint if added
-    // Fallback: read log file content via API if endpoint exists
-  } catch (_) {}
-  // Log tail is a nice-to-have; skip silently if not available
+    const data = await api('/pipeline/log-tail?lines=50');
+    const box = el('log-tail');
+    if (data.lines && data.lines.length > 0) {
+      box.textContent = data.lines.join('\n');
+      box.scrollTop = box.scrollHeight;
+    } else {
+      box.textContent = '[ No log output yet ]';
+    }
+  } catch (_) {
+    // Log tail is a nice-to-have; skip silently if not available
+  }
 }
-
-// Render log tail from localStorage or static placeholder
-el('log-tail').textContent = '[ Log output appears here when pipeline is running ]';
 
 // ── Cluster Review ────────────────────────────────────────────────────────────
 
