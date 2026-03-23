@@ -1,0 +1,29 @@
+# Ignore local runtime and VCS metadata
+.git
+.gitignore
+.pytest_cache
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+*.swp
+*.swo
+
+# Local env / runtime output
+.env
+local/
+/local/
+
+# Build artifacts
+*.log
+*.db
+*.sqlite
+
+# Frontend/editor noise
+node_modules
+.vscode
+.idea
+
+# Local memory/context helpers that shouldn't be baked into runtime image
+.claude
+context_research
