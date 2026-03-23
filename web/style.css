@@ -92,25 +92,16 @@ body {
   color: #bdd3f1;
 }
 
-.rail-prompt-row {
+.rail-ticker {
+  display: grid;
+  gap: 7px;
+}
+
+.rail-ticker-row {
   display: flex;
+  justify-content: space-between;
   gap: 8px;
-}
-
-.rail-prompt-row input {
-  width: 100%;
-  min-width: 0;
-  background: #091426;
-  border: 1px solid var(--line);
-  color: var(--ink);
-  border-radius: 9px;
-  padding: 8px 10px;
-  font: 500 12px/1.2 var(--sans);
-}
-
-.rail-prompt-row input:focus {
-  outline: 2px solid rgba(78, 158, 255, 0.2);
-  border-color: rgba(78, 158, 255, 0.62);
+  font-size: 12px;
 }
 
 .rail-stats {
@@ -450,6 +441,17 @@ kbd {
   text-transform: uppercase;
 }
 
+.panel-log-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+
+.panel-log-head .btn {
+  padding: 6px 9px;
+}
+
 .log-lines {
   background: #050b17;
   color: #9fd3ff;
@@ -463,6 +465,10 @@ kbd {
   padding: 10px;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+.log-lines.expanded {
+  max-height: calc(100vh - 200px);
 }
 
 .split-layout {

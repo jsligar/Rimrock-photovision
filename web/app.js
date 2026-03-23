@@ -86,7 +86,9 @@ function switchTab(tabId) {
   switch (tabId) {
     case 'clusters': loadClusters(); break;
     case 'objects': loadTagBrowser(); break;
-    case 'photos': loadPhotos(1); break;
+    case 'photos':
+      refreshPhotoFilters().finally(() => loadPhotos(1));
+      break;
     case 'settings': loadSettings(); break;
     default: break;
   }
@@ -348,6 +350,27 @@ function renderSidebarSnapshot(phases) {
 
   const errNode = el('sidebar-error-count');
   if (errNode) errNode.textContent = String(errors);
+
+  const tickerPhase = el('ticker-phase');
+  if (tickerPhase) tickerPhase.textContent = running ? running.phase.toUpperCase() : 'Idle';
+
+  const tickerProgress = el('ticker-progress');
+  if (tickerProgress) {
+    if (running && running.progress_total > 0) {
+      const pct = Math.round((running.progress_current / running.progress_total) * 100);
+      tickerProgress.textContent = `${pct}% (${fmt(running.progress_current)} / ${fmt(running.progress_total)})`;
+    } else {
+      tickerProgress.textContent = '-';
+    }
+  }
+
+  const tickerThroughput = el('ticker-throughput');
+  if (tickerThroughput) {
+    const eta = running ? _etaCache[running.phase] : null;
+    tickerThroughput.textContent = eta
+      ? `~${Math.round(eta.ratePerMin)}/min | ETA ~${_fmtEta(eta.etaMinutes)}`
+      : '-';
+  }
 }
 
 function updateSidebarActiveTab(tabId) {
@@ -966,34 +989,7 @@ el('filter-undated').addEventListener('change', () => {
 });
 
 async function initPhotoFilters() {
-  try {
-    const cl = await api('/clusters');
-    const personSel = el('filter-person');
-    cl.filter(c => c.person_label && c.approved && !c.is_noise).forEach(c => {
-      const opt = document.createElement('option');
-      opt.value = c.person_label;
-      opt.textContent = c.person_label;
-      personSel.appendChild(opt);
-    });
-  } catch (_) {
-    // optional
-  }
-
-  try {
-    const grouped = await api('/objects/tags');
-    const tagSel = el('filter-tag');
-
-    Object.values(grouped).forEach(tags => {
-      tags.forEach(t => {
-        const opt = document.createElement('option');
-        opt.value = t.tag;
-        opt.textContent = t.tag;
-        tagSel.appendChild(opt);
-      });
-    });
-  } catch (_) {
-    // optional
-  }
+  await refreshPhotoFilters(false);
 
   const yearSel = el('filter-year');
   const monthSel = el('filter-month');
@@ -1011,6 +1007,62 @@ async function initPhotoFilters() {
     opt.value = String(m).padStart(2, '0');
     opt.textContent = new Date(2000, m - 1, 1).toLocaleString('en', { month: 'long' });
     monthSel.appendChild(opt);
+  }
+}
+
+async function refreshPhotoFilters(preserveSelection = true) {
+  await Promise.all([
+    _refreshPeopleFilter(preserveSelection),
+    _refreshTagsFilter(preserveSelection),
+  ]);
+}
+
+async function _refreshPeopleFilter(preserveSelection) {
+  const personSel = el('filter-person');
+  if (!personSel) return;
+  const prev = preserveSelection ? personSel.value : '';
+
+  personSel.innerHTML = '<option value="">All People</option>';
+  try {
+    const cl = await api('/clusters');
+    cl.filter(c => c.person_label && c.approved && !c.is_noise).forEach(c => {
+      const opt = document.createElement('option');
+      opt.value = c.person_label;
+      opt.textContent = c.person_label;
+      personSel.appendChild(opt);
+    });
+  } catch (_) {
+    // optional
+  }
+
+  if (prev && Array.from(personSel.options).some(o => o.value === prev)) {
+    personSel.value = prev;
+  }
+}
+
+async function _refreshTagsFilter(preserveSelection) {
+  const tagSel = el('filter-tag');
+  if (!tagSel) return;
+  const prev = preserveSelection ? tagSel.value : '';
+
+  tagSel.innerHTML = '<option value="">All Tags</option>';
+  try {
+    const grouped = await api('/objects/tags');
+
+    Object.values(grouped).forEach(tags => {
+      tags.forEach(t => {
+        const opt = document.createElement('option');
+        opt.value = t.tag;
+        opt.textContent = t.tag;
+        tagSel.appendChild(opt);
+      });
+    });
+  } catch (_) {
+    // optional
+  }
+
+  if (prev && Array.from(tagSel.options).some(o => o.value === prev)) {
+    tagSel.value = prev;
   }
 }
 
@@ -1308,19 +1360,12 @@ el('btn-command').addEventListener('click', () => {
   openCommandPalette();
 });
 
-const sidebarCmdBtn = el('sidebar-command-go');
-const sidebarCmdInput = el('sidebar-command-input');
-if (sidebarCmdBtn) {
-  sidebarCmdBtn.addEventListener('click', () => {
-    openCommandPalette((sidebarCmdInput?.value || '').trim());
-  });
-}
-if (sidebarCmdInput) {
-  sidebarCmdInput.addEventListener('keydown', e => {
-    if (e.key === 'Enter') {
-      e.preventDefault();
-      openCommandPalette(sidebarCmdInput.value.trim());
-    }
+const logToggleBtn = el('btn-log-toggle');
+const logTail = el('log-tail');
+if (logToggleBtn && logTail) {
+  logToggleBtn.addEventListener('click', () => {
+    const expanded = logTail.classList.toggle('expanded');
+    logToggleBtn.textContent = expanded ? 'Collapse' : 'Expand';
   });
 }
 

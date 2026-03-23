@@ -17,11 +17,12 @@
         </div>
       </div>
 
-      <section class="rail-card rail-card--prompt">
-        <h3>Command Deck</h3>
-        <div class="rail-prompt-row">
-          <input type="text" id="sidebar-command-input" placeholder="run:process tab:photos query:undated" />
-          <button class="btn btn-accent" id="sidebar-command-go" type="button">Go</button>
+      <section class="rail-card rail-card--ticker">
+        <h3>Live Ticker</h3>
+        <div class="rail-ticker" id="sidebar-ticker">
+          <div class="rail-ticker-row"><span class="dim">Phase</span><strong id="ticker-phase">Idle</strong></div>
+          <div class="rail-ticker-row"><span class="dim">Progress</span><strong id="ticker-progress">-</strong></div>
+          <div class="rail-ticker-row"><span class="dim">Throughput</span><strong id="ticker-throughput">-</strong></div>
         </div>
       </section>
 
@@ -89,7 +90,10 @@
           </section>
 
           <section class="panel panel--log">
-            <h3>Pipeline Log - last 50 lines</h3>
+            <div class="panel-log-head">
+              <h3>Pipeline Log - last 50 lines</h3>
+              <button class="btn" id="btn-log-toggle" type="button">Expand</button>
+            </div>
             <div class="log-lines" id="log-tail">Loading...</div>
           </section>
         </div>
