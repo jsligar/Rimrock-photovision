@@ -1,0 +1,23 @@
+ARG JETSON_PYTORCH_IMAGE=nvcr.io/nvidia/pytorch:25.03-py3-igpu
+FROM ${JETSON_PYTORCH_IMAGE}
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PIP_NO_CACHE_DIR=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libimage-exiftool-perl \
+    rsync \
+    procps \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /workspace/rimrock-photovision
+
+COPY requirements.jetson.txt /tmp/requirements.jetson.txt
+RUN python3 -m pip install --upgrade pip setuptools wheel && \
+    python3 -m pip install -r /tmp/requirements.jetson.txt
+
+COPY . /workspace/rimrock-photovision
+
+CMD ["sleep", "infinity"]

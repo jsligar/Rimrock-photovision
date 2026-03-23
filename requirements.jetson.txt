@@ -1,0 +1,20 @@
+# Jetson container build dependencies.
+# torch/torchvision come from the L4T base image.
+fastapi>=0.111.0
+uvicorn[standard]>=0.29.0
+insightface>=0.7.3
+# onnxruntime-gpu wheels are not published for all Jetson/Python combos.
+# Use CPU ORT as baseline; TensorRT/Jetson acceleration can be added separately.
+onnxruntime>=1.18.0
+opencv-python-headless>=4.9.0
+pillow>=10.3.0
+pillow-heif>=0.16.0
+numpy>=1.26.0
+hdbscan>=0.8.38
+umap-learn>=0.5.6
+ultralytics>=8.2.0
+openai-clip>=1.0.1
+python-dotenv>=1.0.1
+aiofiles>=23.2.1
+pytest>=8.0.0
+httpx>=0.27.0

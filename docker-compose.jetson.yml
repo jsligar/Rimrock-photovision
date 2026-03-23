@@ -1,0 +1,25 @@
+services:
+  rimrock:
+    image: rimrock-photovision-rimrock:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.jetson
+      network: host
+    container_name: rimrock-photovision
+    runtime: nvidia
+    network_mode: host
+    ipc: host
+    working_dir: /workspace/rimrock-photovision
+    environment:
+      RIMROCK_IN_CONTAINER: "1"
+      PYTHONUNBUFFERED: "1"
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: all
+    volumes:
+      - ./:/workspace/rimrock-photovision
+      - /local/rimrock/photos:/local/rimrock/photos
+      - /mnt/mycloud/photos:/mnt/mycloud/photos:ro
+      - ${HOME}/.cache/torch:/root/.cache/torch
+      - ${HOME}/.cache/clip:/root/.cache/clip
+      - ${HOME}/.insightface:/root/.insightface
+    command: ["sleep", "infinity"]

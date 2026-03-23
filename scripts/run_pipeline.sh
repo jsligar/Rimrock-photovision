@@ -2,6 +2,11 @@
 # Run all pipeline phases through Cluster. Stop on any error.
 set -e
 
+if [[ -z "${RIMROCK_IN_CONTAINER:-}" && "${RIMROCK_SKIP_CONTAINER:-0}" != "1" ]]; then
+  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  exec bash "$SCRIPT_DIR/jetson_exec.sh" "bash scripts/run_pipeline.sh"
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 LOG=/local/rimrock/photos/rimrock_photos.log

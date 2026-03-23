@@ -2,6 +2,11 @@
 # Final NAS push — explicit separate step requiring confirmation.
 set -e
 
+if [[ -z "${RIMROCK_IN_CONTAINER:-}" && "${RIMROCK_SKIP_CONTAINER:-0}" != "1" ]]; then
+  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  exec bash "$SCRIPT_DIR/jetson_exec.sh" "bash scripts/push_to_nas.sh"
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 LOG=/local/rimrock/photos/rimrock_photos.log
