@@ -842,13 +842,23 @@ async function loadVocab() {
         <td>${escHtml(v.tag_name)}</td>
         <td class="dim">${escHtml(v.prompts.join(', '))}</td>
         <td><input type="checkbox" ${v.enabled ? 'checked' : ''} disabled /></td>
-        <td><button class="btn btn-danger" onclick="deleteVocab(${v.vocab_id})">Delete</button></td>
+        <td><button class="btn btn-danger js-delete-vocab" data-vocab-id="${v.vocab_id}">Delete</button></td>
       `;
       tbody.appendChild(tr);
     });
   } catch (e) {
     tbody.innerHTML = '<tr><td colspan="5" class="red">Failed to load vocabulary.</td></tr>';
   }
+}
+
+const vocabTbody = el('vocab-tbody');
+if (vocabTbody) {
+  vocabTbody.addEventListener('click', e => {
+    const btn = e.target.closest('.js-delete-vocab');
+    if (!btn) return;
+    const id = parseInt(btn.dataset.vocabId, 10);
+    if (Number.isFinite(id)) deleteVocab(id);
+  });
 }
 
 async function deleteVocab(id) {
@@ -1255,8 +1265,8 @@ function renderPhotoInfo(photo) {
             <span>${escHtml(d.tag)} <span class="dim">(${d.model})</span></span>
             <span class="mono dim">${(d.confidence || 0).toFixed(2)}</span>
             ${d.approved
-              ? `<button class="btn btn-danger" onclick="rejectDetection(${d.detection_id})">Reject</button>`
-              : `<button class="btn" onclick="approveDetection(${d.detection_id})">Approve</button>`}
+              ? `<button class="btn btn-danger js-detection-action" data-action="reject" data-detection-id="${d.detection_id}">Reject</button>`
+              : `<button class="btn js-detection-action" data-action="approve" data-detection-id="${d.detection_id}">Approve</button>`}
           </div>
         `).join('')}
       </div>
@@ -1276,6 +1286,19 @@ function renderPhotoInfo(photo) {
       </div>
     ` : ''}
   `;
+}
+
+const modalInfo = el('modal-info');
+if (modalInfo) {
+  modalInfo.addEventListener('click', e => {
+    const btn = e.target.closest('.js-detection-action');
+    if (!btn) return;
+    const id = parseInt(btn.dataset.detectionId, 10);
+    if (!Number.isFinite(id)) return;
+
+    if (btn.dataset.action === 'reject') rejectDetection(id);
+    if (btn.dataset.action === 'approve') approveDetection(id);
+  });
 }
 
 async function rejectDetection(id) {
