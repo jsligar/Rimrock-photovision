@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import config
 import db
 from pipeline.logger import get_logger
+from pipeline.postmortem import emit_phase_postmortem
 
 log = get_logger("phase6_push")
 
@@ -18,6 +19,7 @@ NAS_DEST_DIR = config.NAS_SOURCE_DIR.parent / "organized"
 
 
 def run_push() -> bool:
+    phase_start = time.time()
     log.info("=" * 60)
     log.info("Phase 6 — PUSH: organized → NAS")
     log.info("=" * 60)
@@ -28,6 +30,7 @@ def run_push() -> bool:
         msg = f"NAS not mounted at {config.NAS_SOURCE_DIR}"
         log.error(msg)
         db.mark_phase_error("push", msg)
+        emit_phase_postmortem(log, "push", phase_start, False, error=msg)
         return False
 
     # Ensure destination parent exists
@@ -37,6 +40,7 @@ def run_push() -> bool:
         msg = f"Cannot create NAS dest dir {NAS_DEST_DIR}: {e}"
         log.error(msg)
         db.mark_phase_error("push", msg)
+        emit_phase_postmortem(log, "push", phase_start, False, error=msg)
         return False
 
     db.mark_phase_running("push")
@@ -88,23 +92,50 @@ def run_push() -> bool:
             msg = f"rsync exited with code {proc.returncode}"
             log.error(msg)
             db.mark_phase_error("push", msg)
+            emit_phase_postmortem(
+                log,
+                "push",
+                phase_start,
+                False,
+                metrics={"Files pushed this run": files_pushed},
+                error=msg,
+            )
             return False
 
     except FileNotFoundError:
         msg = "rsync not found"
         log.error(msg)
         db.mark_phase_error("push", msg)
+        emit_phase_postmortem(log, "push", phase_start, False, error=msg)
         return False
     except Exception as e:
         msg = f"rsync push failed: {e}"
         log.error(msg)
         db.mark_phase_error("push", msg)
+        emit_phase_postmortem(
+            log,
+            "push",
+            phase_start,
+            False,
+            metrics={"Files pushed this run": files_pushed},
+            error=msg,
+        )
         return False
 
     elapsed = time.time() - start_time
     log.info("Push complete. Files pushed: ~%d, Elapsed: %.0f seconds", files_pushed, elapsed)
 
     db.mark_phase_complete("push")
+    emit_phase_postmortem(
+        log,
+        "push",
+        phase_start,
+        True,
+        metrics={
+            "Files pushed this run": files_pushed,
+            "Elapsed (seconds)": f"{elapsed:.0f}",
+        },
+    )
     return True
 
 

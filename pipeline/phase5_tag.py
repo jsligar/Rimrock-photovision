@@ -2,6 +2,7 @@
 
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -9,12 +10,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import config
 import db
 from pipeline.logger import get_logger
+from pipeline.postmortem import emit_phase_postmortem
 from pipeline import shutdown
 
 log = get_logger("phase5_tag")
 
 
 def run_tag() -> bool:
+    phase_start = time.time()
     log.info("=" * 60)
     log.info("Phase 5 — TAG: write XMP tags to organized photos")
     log.info("=" * 60)
@@ -41,6 +44,14 @@ def run_tag() -> bool:
             log.info("Graceful shutdown: stopping tag after %d photos.", done)
             conn.close()
             db.mark_phase_error("tag", f"Stopped by user after {done} photos")
+            emit_phase_postmortem(
+                log,
+                "tag",
+                phase_start,
+                False,
+                metrics={"Photos to tag": total, "Done": done, "Skipped": skipped, "Errors": errors},
+                error=f"Stopped by user after {done} photos",
+            )
             return False
 
         photo_id = row["photo_id"]
@@ -112,6 +123,18 @@ def run_tag() -> bool:
 
     conn.close()
     db.mark_phase_complete("tag")
+    emit_phase_postmortem(
+        log,
+        "tag",
+        phase_start,
+        True,
+        metrics={
+            "Photos to tag": total,
+            "Tagged": done - skipped,
+            "Skipped (no tags)": skipped,
+            "Errors": errors,
+        },
+    )
     return True
 
 

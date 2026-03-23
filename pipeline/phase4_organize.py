@@ -3,6 +3,7 @@
 import hashlib
 import shutil
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -11,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import config
 import db
 from pipeline.logger import get_logger
+from pipeline.postmortem import emit_phase_postmortem
 from pipeline import shutdown
 
 log = get_logger("phase4_organize")
@@ -52,6 +54,7 @@ def _unique_dest_path(dest_dir: Path, filename: str) -> Path:
 
 
 def run_organize() -> bool:
+    phase_start = time.time()
     log.info("=" * 60)
     log.info("Phase 4 — ORGANIZE: copy to YYYY/YYYY-MM structure")
     log.info("=" * 60)
@@ -75,6 +78,14 @@ def run_organize() -> bool:
         if shutdown.is_requested():
             log.info("Graceful shutdown: stopping organize after %d photos.", done)
             db.mark_phase_error("organize", f"Stopped by user after {done} photos")
+            emit_phase_postmortem(
+                log,
+                "organize",
+                phase_start,
+                False,
+                metrics={"Photos to organize": total, "Done": done, "Errors": errors},
+                error=f"Stopped by user after {done} photos",
+            )
             return False
 
         photo_id = row["photo_id"]
@@ -120,6 +131,13 @@ def run_organize() -> bool:
     db.update_phase_progress("organize", done, total)
     log.info("Organize complete. Done: %d, Errors: %d", done, errors)
     db.mark_phase_complete("organize")
+    emit_phase_postmortem(
+        log,
+        "organize",
+        phase_start,
+        True,
+        metrics={"Photos to organize": total, "Done": done, "Errors": errors},
+    )
     return True
 
 

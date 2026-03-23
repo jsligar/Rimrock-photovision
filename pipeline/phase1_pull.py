@@ -4,7 +4,6 @@ import re
 import subprocess
 import sys
 import time
-from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -12,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import config
 import db
 from pipeline.logger import get_logger
+from pipeline.postmortem import emit_phase_postmortem
 
 log = get_logger("phase1_pull")
 
@@ -24,7 +24,29 @@ def _count_files(directory: Path) -> int:
     return count
 
 
+def _scan_media_stats(directory: Path) -> tuple[int, int]:
+    """Return (media_file_count, total_bytes) for known image/raw extensions."""
+    allowed_exts = {e.lower() for e in (config.IMAGE_EXTENSIONS | config.RAW_EXTENSIONS)}
+    total_files = 0
+    total_bytes = 0
+
+    for path in directory.rglob("*"):
+        if not path.is_file():
+            continue
+        if path.suffix.lower() not in allowed_exts:
+            continue
+        total_files += 1
+        try:
+            total_bytes += path.stat().st_size
+        except OSError:
+            # Skip unreadable/transient files without aborting pre-scan.
+            continue
+
+    return total_files, total_bytes
+
+
 def run_pull() -> bool:
+    phase_start = time.time()
     log.info("=" * 60)
     log.info("Phase 1 — PULL: NAS → Rimrock NVMe")
     log.info("=" * 60)
@@ -33,12 +55,26 @@ def run_pull() -> bool:
         msg = f"NAS not mounted at {config.NAS_SOURCE_DIR}"
         log.error(msg)
         db.mark_phase_error("pull", msg)
+        emit_phase_postmortem(log, "pull", phase_start, False, error=msg)
         return False
 
     config.ORIGINALS_DIR.mkdir(parents=True, exist_ok=True)
 
     db.mark_phase_running("pull")
     start_time = time.time()
+
+    # Pre-pull inventory snapshot for operator visibility.
+    source_files, source_bytes = _scan_media_stats(config.NAS_SOURCE_DIR)
+    existing_files, existing_bytes = _scan_media_stats(config.ORIGINALS_DIR)
+    pending_files_est = max(0, source_files - existing_files)
+
+    db.update_phase_progress("pull", existing_files, source_files)
+    log.info("Pre-pull inventory:")
+    log.info("  Source media files:   %d", source_files)
+    log.info("  Source media size:    %.1f GB", source_bytes / 1024**3)
+    log.info("  Existing local files: %d", existing_files)
+    log.info("  Existing local size:  %.1f GB", existing_bytes / 1024**3)
+    log.info("  Estimated pending:    %d files", pending_files_est)
 
     cmd = [
         "rsync",
@@ -102,17 +138,38 @@ def run_pull() -> bool:
             msg = f"rsync exited with code {proc.returncode}"
             log.error(msg)
             db.mark_phase_error("pull", msg)
+            emit_phase_postmortem(
+                log,
+                "pull",
+                phase_start,
+                False,
+                metrics={
+                    "Source files": source_files,
+                    "Existing files before pull": existing_files,
+                    "Files transferred this run": files_transferred,
+                },
+                error=msg,
+            )
             return False
 
     except FileNotFoundError:
         msg = "rsync not found. Install it: sudo apt install rsync"
         log.error(msg)
         db.mark_phase_error("pull", msg)
+        emit_phase_postmortem(log, "pull", phase_start, False, error=msg)
         return False
     except Exception as e:
         msg = f"rsync failed: {e}"
         log.error(msg)
         db.mark_phase_error("pull", msg)
+        emit_phase_postmortem(
+            log,
+            "pull",
+            phase_start,
+            False,
+            metrics={"Files transferred this run": files_transferred},
+            error=msg,
+        )
         return False
 
     elapsed = time.time() - start_time
@@ -135,6 +192,20 @@ def run_pull() -> bool:
     log.info("  Elapsed: %.0f seconds", elapsed)
 
     db.mark_phase_complete("pull")
+    emit_phase_postmortem(
+        log,
+        "pull",
+        phase_start,
+        True,
+        metrics={
+            "Source files": source_files,
+            "Existing files before pull": existing_files,
+            "Files transferred this run": files_transferred,
+            "Total files in originals": total_files,
+            "Total size (GB)": f"{total_gb:.1f}",
+            "rsync exit code": proc.returncode if "proc" in locals() else "unknown",
+        },
+    )
     return True
 
 

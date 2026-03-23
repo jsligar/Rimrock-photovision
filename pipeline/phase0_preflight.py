@@ -4,6 +4,7 @@ import shutil
 import subprocess
 import sys
 import importlib
+import time
 from pathlib import Path
 
 # Allow running from project root
@@ -11,6 +12,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import config
 import db
+from pipeline.logger import get_logger
+from pipeline.postmortem import emit_phase_postmortem
+
+log = get_logger("phase0_preflight")
 
 
 REQUIRED_PACKAGES = [
@@ -125,6 +130,7 @@ def check_python_packages() -> tuple[bool, str]:
 
 
 def run_preflight() -> bool:
+    phase_start = time.time()
     print("=" * 60)
     print("RIMROCK PHOTO TAGGER — PREFLIGHT CHECK")
     print("=" * 60)
@@ -170,9 +176,30 @@ def run_preflight() -> bool:
         print(f"  Models cached:   {models_cached}")
         print(f"  DB initialized:  YES")
         db.mark_phase_complete("preflight")
+        emit_phase_postmortem(
+            log,
+            "preflight",
+            phase_start,
+            True,
+            metrics={
+                "NVMe free (GB)": f"{free_gb:.1f}",
+                "NAS reachable": "YES" if nas_ok else "NO",
+                "Ollama running": "NO" if ollama_ok else "YES",
+                "Models cached": models_cached,
+            },
+        )
     else:
         print("PREFLIGHT FAILED — resolve the above errors before continuing.")
         db.mark_phase_error("preflight", "One or more preflight checks failed")
+        failed_checks = [name for name, (passed, _) in results.items() if not passed]
+        emit_phase_postmortem(
+            log,
+            "preflight",
+            phase_start,
+            False,
+            metrics={"Failed checks": ", ".join(failed_checks) if failed_checks else "unknown"},
+            error="One or more preflight checks failed",
+        )
 
     return all_passed
 

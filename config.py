@@ -52,46 +52,48 @@ CLIP_TAG_THRESHOLD  = 0.26
 MAX_INFERENCE_DIM   = 1920
 IMAGE_EXTENSIONS    = {".jpg", ".jpeg", ".png", ".heic", ".tiff", ".tif", ".webp"}
 RAW_EXTENSIONS      = {".raw", ".cr2", ".cr3", ".nef", ".arw", ".dng"}
+# Exclude screenshot-like files from process phase discovery.
+# Override with env var SCREENSHOT_EXCLUDE_PATTERNS as comma-separated tokens.
+_SCREENSHOT_DEFAULTS = ["screenshot", "screen shot", "screenrecording", "screen recording"]
+SCREENSHOT_EXCLUDE_PATTERNS = [
+    token.strip().lower()
+    for token in os.getenv("SCREENSHOT_EXCLUDE_PATTERNS", ",".join(_SCREENSHOT_DEFAULTS)).split(",")
+    if token.strip()
+]
 
 # ── Semantic Tag Vocabulary ────────────────────────────────────────────────────
 SEMANTIC_TAG_GROUPS = {
+    # First-run core vocabulary: smaller tag set for faster CLIP inference.
     "vehicles": {
-        "pickup truck":     ["a pickup truck", "a truck in a driveway"],
-        "classic truck":    ["a vintage pickup truck", "a classic 1970s truck", "an old farm truck"],
-        "SUV":              ["an SUV", "a sport utility vehicle"],
-        "military vehicle": ["a military vehicle", "an Army truck", "a HMMWV"],
-        "tractor":          ["a farm tractor", "agricultural equipment"],
-        "ATV / UTV":        ["an ATV", "a side-by-side UTV", "a four-wheeler"],
-        "motorcycle":       ["a motorcycle", "a dirt bike"],
-        "car":              ["a passenger car", "a sedan"],
+        "pickup truck": ["a pickup truck", "a truck in a driveway"],
+        "SUV":          ["an SUV", "a sport utility vehicle"],
+        "car":          ["a passenger car", "a sedan"],
     },
     "animals": {
         "dog":    ["a dog", "a pet dog", "a dog playing outside"],
         "cat":    ["a cat", "a pet cat", "a cat indoors"],
-        "puppy":  ["a puppy", "a young dog"],
-        "kitten": ["a kitten", "a baby cat"],
         "horse":  ["a horse", "a horse in a field"],
         "cattle": ["cattle", "cows in a field", "livestock"],
         "deer":   ["a deer", "whitetail deer"],
         "bird":   ["a bird", "birds in the yard"],
     },
     "scenes": {
-        "outdoors":    ["outdoor scenery", "nature landscape"],
-        "birthday":    ["a birthday party", "birthday cake"],
-        "holiday":     ["holiday decorations", "Christmas tree"],
-        "camping":     ["camping", "a campfire", "tent camping outdoors"],
-        "sports":      ["sports activity", "playing sports"],
-        "Boy Scouts":  ["Boy Scouts activity", "scouting outdoors"],
-        "graduation":  ["graduation ceremony", "graduation gown"],
-        "military":    ["military uniform", "Army uniform", "military ceremony"],
+        "outdoors": ["outdoor scenery", "nature landscape"],
+        "birthday": ["a birthday party", "birthday cake"],
+        "holiday":  ["holiday decorations", "Christmas tree"],
+        "military": ["military uniform", "Army uniform", "military ceremony"],
     },
 }
 
 YOLO_DIRECT_TAGS = {
-    "car": "car", "truck": "pickup truck", "bus": "bus",
-    "motorcycle": "motorcycle", "bicycle": "bicycle",
-    "dog": "dog", "cat": "cat", "horse": "horse",
-    "cow": "cattle", "bird": "bird", "sheep": "livestock",
+    "car": "car",
+    "truck": "pickup truck",
+    "dog": "dog",
+    "cat": "cat",
+    "horse": "horse",
+    "cow": "cattle",
+    "bird": "bird",
+    "sheep": "cattle",
 }
 
 # ── API ────────────────────────────────────────────────────────────────────────

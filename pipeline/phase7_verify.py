@@ -3,6 +3,7 @@
 import hashlib
 import random
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -10,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import config
 import db
 from pipeline.logger import get_logger
+from pipeline.postmortem import emit_phase_postmortem
 
 log = get_logger("phase7_verify")
 
@@ -26,6 +28,7 @@ def _sha256(path: Path) -> str:
 
 
 def run_verify() -> dict:
+    phase_start = time.time()
     log.info("=" * 60)
     log.info("Phase 7 — VERIFY: post-push integrity check")
     log.info("=" * 60)
@@ -126,6 +129,21 @@ def run_verify() -> dict:
     log.info("  Untagged:         %d", len(untagged_list))
 
     db.mark_phase_complete("verify")
+    emit_phase_postmortem(
+        log,
+        "verify",
+        phase_start,
+        True,
+        metrics={
+            "Local files": local_count,
+            "NAS files": nas_count,
+            "NAS reachable": "YES" if nas_reachable else "NO",
+            "Spot-check pass": f"{checksum_pass}/{sample_size}",
+            "Checksum failures": checksum_fail,
+            "Undated": len(undated_list),
+            "Untagged": len(untagged_list),
+        },
+    )
     return report
 
 

@@ -1,6 +1,7 @@
 """Phase 3 — Cluster: UMAP + HDBSCAN face identity clustering."""
 
 import sys
+import time
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
@@ -12,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import config
 import db
 from pipeline.logger import get_logger
+from pipeline.postmortem import emit_phase_postmortem
 
 log = get_logger("phase3_cluster")
 
@@ -21,6 +23,7 @@ def _now() -> str:
 
 
 def run_cluster() -> bool:
+    phase_start = time.time()
     log.info("=" * 60)
     log.info("Phase 3 — CLUSTER: UMAP + HDBSCAN face clustering")
     log.info("=" * 60)
@@ -40,6 +43,13 @@ def run_cluster() -> bool:
         log.warning("No faces found in database. Skipping cluster phase.")
         db.mark_phase_complete("cluster")
         conn.close()
+        emit_phase_postmortem(
+            log,
+            "cluster",
+            phase_start,
+            True,
+            metrics={"Faces loaded": 0, "Clusters": 0, "Noise faces": 0},
+        )
         return True
 
     face_ids = [r[0] for r in rows]
@@ -111,10 +121,23 @@ def run_cluster() -> bool:
     log.info("Cluster phase complete.")
     log.info("  Total clusters: %d", n_clusters)
     log.info("  Noise faces:    %d", n_noise)
-    log.info("  Labeled:        %d", _count_labeled(conn))
+    labeled_count = _count_labeled(conn)
+    log.info("  Labeled:        %d", labeled_count)
 
     db.mark_phase_complete("cluster")
     conn.close()
+    emit_phase_postmortem(
+        log,
+        "cluster",
+        phase_start,
+        True,
+        metrics={
+            "Faces loaded": len(face_ids),
+            "Clusters": n_clusters,
+            "Noise faces": n_noise,
+            "Labeled clusters": labeled_count,
+        },
+    )
     return True
 
 

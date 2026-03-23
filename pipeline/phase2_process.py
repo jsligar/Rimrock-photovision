@@ -6,6 +6,7 @@ import signal
 import subprocess
 import sys
 import time
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -18,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import config
 import db
 from pipeline.logger import get_logger
+from pipeline.postmortem import emit_phase_postmortem
 from pipeline import shutdown
 
 log = get_logger("phase2_process")
@@ -252,8 +254,12 @@ def run_process() -> bool:
     import torch.nn.functional as F
     import clip as openai_clip
 
-    signal.signal(signal.SIGINT, _handle_signal)
-    signal.signal(signal.SIGTERM, _handle_signal)
+    phase_start = time.time()
+    if threading.current_thread() is threading.main_thread():
+        signal.signal(signal.SIGINT, _handle_signal)
+        signal.signal(signal.SIGTERM, _handle_signal)
+    else:
+        log.info("Running in worker thread; skipping OS signal handler registration.")
 
     log.info("=" * 60)
     log.info("Phase 2 — PROCESS: face + semantic tagging")
@@ -276,6 +282,23 @@ def run_process() -> bool:
     for ext in config.IMAGE_EXTENSIONS:
         all_photos.extend(config.ORIGINALS_DIR.rglob(f"*{ext}"))
         all_photos.extend(config.ORIGINALS_DIR.rglob(f"*{ext.upper()}"))
+
+    screenshot_skipped = 0
+    if config.SCREENSHOT_EXCLUDE_PATTERNS:
+        filtered_photos = []
+        for photo_path in all_photos:
+            rel_lower = str(photo_path.relative_to(config.ORIGINALS_DIR)).lower()
+            if any(token in rel_lower for token in config.SCREENSHOT_EXCLUDE_PATTERNS):
+                screenshot_skipped += 1
+                continue
+            filtered_photos.append(photo_path)
+        all_photos = filtered_photos
+        if screenshot_skipped:
+            log.warning(
+                "Skipped %d screenshot-like image(s) by pattern filter: %s",
+                screenshot_skipped,
+                ", ".join(config.SCREENSHOT_EXCLUDE_PATTERNS),
+            )
 
     raw_files: list = []
     for ext in config.RAW_EXTENSIONS:
@@ -305,12 +328,15 @@ def run_process() -> bool:
             continue
 
         try:
-            _process_single_photo(
+            did_process = _process_single_photo(
                 photo_path, rel_path,
                 face_app, yolo_model, clip_model, clip_preprocess, clip_prompt_cache,
                 torch, F, openai_clip
             )
-            processed_count += 1
+            if did_process:
+                processed_count += 1
+            else:
+                errors += 1
         except Exception as e:
             log.error("Error processing %s: %s", rel_path, e, exc_info=True)
             errors += 1
@@ -329,8 +355,25 @@ def run_process() -> bool:
         db.mark_phase_complete("process")
     else:
         db.mark_phase_error("process", f"Stopped by user after {processed_count} photos")
+    success = not shutdown.is_requested()
+    emit_phase_postmortem(
+        log,
+        "process",
+        phase_start,
+        success,
+        metrics={
+            "Total discovered": total,
+            "Already processed at start": len(processed_paths),
+            "Processed this run": max(0, processed_count - len(processed_paths)),
+            "Processed total": processed_count,
+            "Errors": errors,
+            "RAW skipped": len(raw_files),
+            "Screenshots skipped": screenshot_skipped,
+        },
+        error=None if success else f"Stopped by user after {processed_count} photos",
+    )
 
-    return not shutdown.is_requested()
+    return success
 
 
 def _process_single_photo(
@@ -344,13 +387,13 @@ def _process_single_photo(
     torch,
     F,
     openai_clip,
-) -> None:
+) -> bool:
     import torch as _torch
 
     # ── Load Image ──
     img = _load_image(photo_path)
     if img is None:
-        return
+        return False
     img = _resize_image(img)
 
     # ── Read Existing Metadata ──
@@ -498,6 +541,7 @@ def _process_single_photo(
     )
     conn.commit()
     conn.close()
+    return True
 
 
 def _tag_group(tag: str) -> str | None:
