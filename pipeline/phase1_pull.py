@@ -61,8 +61,6 @@ def run_pull() -> bool:
     files_transferred = 0
     # Pattern to detect rsync per-file progress lines: "    123,456  45%   1.23MB/s  0:00:12"
     progress_re = re.compile(r'^\s+[\d,]+\s+\d+%')
-    # Pattern to detect file transfer completion: "filename\n"
-    xfer_re = re.compile(r'^(?!\s)(.+)\s*$')
 
     try:
         proc = subprocess.Popen(
@@ -89,7 +87,7 @@ def run_pull() -> bool:
                 and not line.startswith("sent")
                 and not line.startswith("total")
                 and not line.startswith("rsync")
-                and "/" in line or "." in line
+                and ("/" in line or "." in line)
             ):
                 # Looks like a filename being transferred
                 if not any(line.startswith(s) for s in ["building", "delta", "Number", "send", "recv"]):

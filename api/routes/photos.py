@@ -20,6 +20,8 @@ def browse_photos(
     page: int = 1,
     per_page: int = 60,
 ):
+    page = max(1, page)
+    per_page = min(max(1, per_page), 500)
     conn = db.get_db()
     offset = (page - 1) * per_page
 
@@ -27,7 +29,7 @@ def browse_photos(
     params: list = []
 
     if undated:
-        where_clauses.append("(p.exif_date IS NULL OR p.dest_path LIKE ?)")
+        where_clauses.append("(p.dest_path LIKE ? OR (p.exif_date IS NULL AND p.dest_path IS NOT NULL))")
         params.append(f"{config.UNDATED_DIR}/%")
     elif year:
         where_clauses.append("p.exif_date LIKE ?")
