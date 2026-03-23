@@ -161,6 +161,7 @@ function renderPhaseGrid(phases, counts) {
         <button class="btn btn-accent run-btn" data-phase="${def.id}" ${canRun && !isPush ? '' : 'disabled'} ${isPush ? 'id="btn-run-push"' : ''}>
           Run
         </button>
+        ${p.status === 'running' ? `<button class="btn btn-danger stop-btn" data-phase="${def.id}">Stop</button>` : ''}
         ${isCluster ? '<span class="note">Review clusters before Organize</span>' : ''}
       </div>
     `;
@@ -179,8 +180,19 @@ function renderPhaseGrid(phases, counts) {
 
   grid.querySelectorAll('.run-btn').forEach(btn => {
     if (!btn.disabled) {
-      btn.addEventListener('click', () => triggerPhase(btn.dataset.phase));
+      btn.addEventListener('click', () => {
+        const phase = btn.dataset.phase;
+        if (phase === 'process') {
+          const ok = confirm('Start Process phase now? This can run for hours and use significant GPU resources.');
+          if (!ok) return;
+        }
+        triggerPhase(phase);
+      });
     }
+  });
+
+  grid.querySelectorAll('.stop-btn').forEach(btn => {
+    btn.addEventListener('click', stopPipeline);
   });
 }
 
@@ -189,7 +201,14 @@ function _phaseCountLine(id, p, counts) {
 
   switch (id) {
     case 'pull':
-      return `${fmt(counts.total_photos)} photos`;
+      {
+        const pulled = p.progress_total || p.progress_current || 0;
+        const total = counts.total_photos || 0;
+        if (pulled > 0 && total > 0 && pulled !== total) {
+          return `${fmt(pulled)} pulled | ${fmt(total)} total`;
+        }
+        return `${fmt(total || pulled)} photos`;
+      }
     case 'process':
       return `${fmt(counts.total_photos)} photos | ${fmt(counts.total_faces)} faces`;
     case 'cluster':
@@ -211,6 +230,17 @@ async function triggerPhase(phase) {
     scheduleAutoRefresh();
   } catch (e) {
     showToast(`Failed to start ${phase}.`, 'err');
+  }
+}
+
+async function stopPipeline() {
+  try {
+    await apiPost('/pipeline/stop');
+    showToast('Stop requested. Waiting for current phase to halt...', 'ok');
+    await refreshStatus();
+    scheduleAutoRefresh();
+  } catch (e) {
+    showToast('Failed to request stop.', 'err');
   }
 }
 
