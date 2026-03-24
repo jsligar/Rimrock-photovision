@@ -220,13 +220,17 @@ def load_models():
     from insightface.app import FaceAnalysis
     from ultralytics import YOLO
 
+    import onnxruntime as ort
+    log.info("ORT providers: %s", ort.get_available_providers())
+
     log.info("Loading InsightFace %s...", config.INSIGHTFACE_MODEL)
     face_app = FaceAnalysis(name=config.INSIGHTFACE_MODEL, ctx_id=config.CTX_ID)
     face_app.prepare(ctx_id=config.CTX_ID, det_size=config.DET_SIZE, det_thresh=config.DET_THRESH)
 
-    log.info("Loading YOLOv8s...")
+    log.info("Loading YOLO model: %s", config.YOLO_MODEL)
     yolo_model = YOLO(config.YOLO_MODEL)
-    yolo_model.to("cuda")
+    if not config.YOLO_MODEL.endswith(".engine"):
+        yolo_model.to("cuda")
 
     log.info("Loading CLIP %s...", config.CLIP_MODEL)
     clip_model, clip_preprocess = openai_clip.load(config.CLIP_MODEL, device=config.CLIP_DEVICE)

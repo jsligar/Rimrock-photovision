@@ -15,6 +15,12 @@ services:
       PYTHONUNBUFFERED: "1"
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: all
+      # ORT TensorRT provider settings
+      ORT_TENSORRT_ENGINE_CACHE_ENABLE: "1"
+      ORT_TENSORRT_CACHE_PATH: /local/rimrock/trt_cache
+      ORT_TENSORRT_FP16_ENABLE: "1"
+      # YOLO model — TensorRT engine exported in-container
+      YOLO_MODEL: "yolov8s.engine"
     volumes:
       - ./:/workspace/rimrock-photovision
       - /local/rimrock/photos:/local/rimrock/photos
@@ -22,4 +28,5 @@ services:
       - ${HOME}/.cache/torch:/root/.cache/torch
       - ${HOME}/.cache/clip:/root/.cache/clip
       - ${HOME}/.insightface:/root/.insightface
+      - /local/rimrock/trt_cache:/local/rimrock/trt_cache
     command: ["sleep", "infinity"]

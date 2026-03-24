@@ -38,9 +38,13 @@ GT_MIN_CONFIDENCE  = 0.75
 
 # ── YOLOv8 ────────────────────────────────────────────────────────────────────
 # YOLOv8s chosen over YOLOv8m to preserve ~500MB RAM headroom on 8GB unified memory
-YOLO_MODEL          = "yolov8s.pt"
+# Set YOLO_MODEL=yolov8s.engine in docker-compose after TRT export.
+YOLO_MODEL          = os.getenv("YOLO_MODEL", "yolov8s.pt")
 YOLO_CONF_THRESHOLD = 0.45
 YOLO_IOU_THRESHOLD  = 0.5
+
+# ── TensorRT ────────────────────────────────────────────────────────────────
+TRT_ENGINE_CACHE    = Path(os.getenv("TRT_ENGINE_CACHE", "/local/rimrock/trt_cache"))
 
 # ── CLIP ──────────────────────────────────────────────────────────────────────
 CLIP_MODEL          = "ViT-B/32"

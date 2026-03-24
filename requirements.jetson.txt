@@ -2,10 +2,10 @@
 # torch/torchvision come from the L4T base image.
 fastapi>=0.111.0
 uvicorn[standard]>=0.29.0
+setuptools<81  # pkg_resources is required by parts of the current pipeline stack
 insightface>=0.7.3
-# onnxruntime-gpu wheels are not published for all Jetson/Python combos.
-# Use CPU ORT as baseline; TensorRT/Jetson acceleration can be added separately.
-onnxruntime>=1.18.0
+# onnxruntime-gpu is built from source in Dockerfile.jetson (jetson-containers method).
+# Do NOT add onnxruntime here — it would overwrite the GPU build with a CPU-only wheel.
 opencv-python-headless>=4.9.0
 pillow>=10.3.0
 pillow-heif>=0.16.0
