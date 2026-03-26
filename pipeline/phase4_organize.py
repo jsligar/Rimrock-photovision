@@ -62,9 +62,14 @@ def run_organize() -> bool:
     db.mark_phase_running("organize")
 
     conn = db.get_db()
-    photos = conn.execute(
-        "SELECT photo_id, source_path, filename, exif_date FROM photos WHERE dest_path IS NULL"
-    ).fetchall()
+    query = "SELECT photo_id, source_path, filename, exif_date FROM photos WHERE dest_path IS NULL"
+    params: list = []
+    if config.TEST_YEAR_SCOPE:
+        query += " AND source_path LIKE ?"
+        params.append(f"%/{config.TEST_YEAR_SCOPE}/%")
+        log.info("TEST_YEAR_SCOPE=%s active for organize phase.", config.TEST_YEAR_SCOPE)
+
+    photos = conn.execute(query, params).fetchall()
     conn.close()
 
     total = len(photos)

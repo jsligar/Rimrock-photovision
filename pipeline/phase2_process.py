@@ -18,6 +18,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import config
 import db
+from clip_compat import ensure_pkg_resources_packaging
+from ocr_utils import extract_ocr_text, tesseract_available
 from pipeline.logger import get_logger
 from pipeline.postmortem import emit_phase_postmortem
 from pipeline import shutdown
@@ -89,6 +91,28 @@ def _run_exiftool(photo_path: Path) -> dict:
     except Exception as e:
         log.debug("exiftool error for %s: %s", photo_path, e)
     return {}
+
+
+def _load_prefilter_skiplist() -> set[str]:
+    """Load relative source paths flagged by phase1 prefilter."""
+    path = config.PREFILTER_REJECTS_PATH
+    if not path.exists():
+        return set()
+
+    out: set[str] = set()
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.rstrip("\n")
+                if not line:
+                    continue
+                rel_path = line.split("\t", 1)[0].strip()
+                if rel_path:
+                    out.add(rel_path)
+    except Exception as e:
+        log.warning("Could not load prefilter skip list %s: %s", path, e)
+        return set()
+    return out
 
 
 def _parse_google_sidecar(photo_path: Path) -> tuple[str | None, list[str]]:
@@ -215,6 +239,7 @@ def load_models():
     """Load all models once. Returns (face_app, yolo_model, clip_model, clip_preprocess, clip_prompt_cache)."""
     import torch
     import torch.nn.functional as F
+    ensure_pkg_resources_packaging()
     import clip as openai_clip
     import insightface
     from insightface.app import FaceAnalysis
@@ -256,6 +281,7 @@ def load_models():
 def run_process() -> bool:
     import torch
     import torch.nn.functional as F
+    ensure_pkg_resources_packaging()
     import clip as openai_clip
 
     phase_start = time.time()
@@ -273,6 +299,9 @@ def run_process() -> bool:
 
     face_app, yolo_model, clip_model, clip_preprocess, clip_prompt_cache = load_models()
 
+    if config.ENABLE_SEARCH_LAYER and config.SEARCH_OCR_ENABLED and not tesseract_available():
+        log.warning("SEARCH_OCR_ENABLED is on, but tesseract is unavailable. OCR indexing will be skipped.")
+
     # Collect all unprocessed photos
     conn = db.get_db()
     processed_paths = set(
@@ -286,6 +315,24 @@ def run_process() -> bool:
     for ext in config.IMAGE_EXTENSIONS:
         all_photos.extend(config.ORIGINALS_DIR.rglob(f"*{ext}"))
         all_photos.extend(config.ORIGINALS_DIR.rglob(f"*{ext.upper()}"))
+
+    year_scope_skipped = 0
+    if config.TEST_YEAR_SCOPE:
+        year_token = str(config.TEST_YEAR_SCOPE).strip()
+        filtered_photos = []
+        for photo_path in all_photos:
+            rel = str(photo_path.relative_to(config.ORIGINALS_DIR)).replace("\\", "/")
+            padded = f"/{rel}/"
+            if f"/{year_token}/" in padded:
+                filtered_photos.append(photo_path)
+            else:
+                year_scope_skipped += 1
+        all_photos = filtered_photos
+        log.warning(
+            "TEST_YEAR_SCOPE=%s active: skipped %d image(s) outside year scope.",
+            year_token,
+            year_scope_skipped,
+        )
 
     screenshot_skipped = 0
     if config.SCREENSHOT_EXCLUDE_PATTERNS:
@@ -304,6 +351,24 @@ def run_process() -> bool:
                 ", ".join(config.SCREENSHOT_EXCLUDE_PATTERNS),
             )
 
+    prefilter_skipped = 0
+    prefilter_skip_paths = _load_prefilter_skiplist()
+    if prefilter_skip_paths:
+        filtered_photos = []
+        for photo_path in all_photos:
+            rel_path = str(photo_path.relative_to(config.ORIGINALS_DIR))
+            if rel_path in prefilter_skip_paths:
+                prefilter_skipped += 1
+                continue
+            filtered_photos.append(photo_path)
+        all_photos = filtered_photos
+        if prefilter_skipped:
+            log.warning(
+                "Skipped %d image(s) from phase1 prefilter mismatch list: %s",
+                prefilter_skipped,
+                config.PREFILTER_REJECTS_PATH,
+            )
+
     raw_files: list = []
     for ext in config.RAW_EXTENSIONS:
         raw_files.extend(config.ORIGINALS_DIR.rglob(f"*{ext}"))
@@ -315,11 +380,21 @@ def run_process() -> bool:
             len(raw_files),
         )
 
-    total = len(all_photos)
-    log.info("Found %d images to process (%d already done)", total, len(processed_paths))
-    db.update_phase_progress("process", len(processed_paths), total)
+    all_rel_paths = {str(p.relative_to(config.ORIGINALS_DIR)) for p in all_photos}
+    already_done_in_scope = len(processed_paths & all_rel_paths)
+    already_done_out_of_scope = max(0, len(processed_paths) - already_done_in_scope)
 
-    processed_count = len(processed_paths)
+    total = len(all_photos)
+    log.info("Found %d images to process (%d already done in current scope)", total, already_done_in_scope)
+    if already_done_out_of_scope:
+        log.info(
+            "Ignoring %d previously processed image(s) that are outside current filters "
+            "(screenshot/prefilter).",
+            already_done_out_of_scope,
+        )
+    db.update_phase_progress("process", already_done_in_scope, total)
+
+    processed_count = already_done_in_scope
     errors = 0
 
     for photo_path in all_photos:
@@ -367,12 +442,15 @@ def run_process() -> bool:
         success,
         metrics={
             "Total discovered": total,
-            "Already processed at start": len(processed_paths),
-            "Processed this run": max(0, processed_count - len(processed_paths)),
+            "Already processed at start (in scope)": already_done_in_scope,
+            "Already processed outside scope": already_done_out_of_scope,
+            "Processed this run": max(0, processed_count - already_done_in_scope),
             "Processed total": processed_count,
             "Errors": errors,
             "RAW skipped": len(raw_files),
+            "Year-scope skipped": year_scope_skipped,
             "Screenshots skipped": screenshot_skipped,
+            "Prefilter skipped": prefilter_skipped,
         },
         error=None if success else f"Stopped by user after {processed_count} photos",
     )
@@ -515,10 +593,23 @@ def _process_single_photo(
     # ── CLIP Pass ──
     try:
         pil_img = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+
+        if config.ENABLE_SEARCH_LAYER and config.SEARCH_OCR_ENABLED and tesseract_available():
+            ocr_text = extract_ocr_text(pil_img)
+            conn.execute(
+                "UPDATE photos SET ocr_text=?, ocr_extracted_at=? WHERE photo_id=?",
+                (ocr_text, now, photo_id),
+            )
+
         image_input = clip_preprocess(pil_img).unsqueeze(0).to(config.CLIP_DEVICE)
         with _torch.no_grad():
             image_embedding = clip_model.encode_image(image_input).float()
             image_embedding = F.normalize(image_embedding, dim=-1).squeeze(0)
+
+        if config.ENABLE_SEARCH_LAYER:
+            emb_bytes = image_embedding.cpu().numpy().astype(np.float32).tobytes()
+            conn.execute("UPDATE photos SET clip_embedding=? WHERE photo_id=?",
+                         (emb_bytes, photo_id))
 
         for group, tags in clip_prompt_cache.items():
             for tag_name, prompt_embedding in tags.items():

@@ -10,6 +10,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libimage-exiftool-perl \
     rsync \
     procps \
+    tesseract-ocr \
+    tesseract-ocr-eng \
     build-essential \
     cmake \
     git \

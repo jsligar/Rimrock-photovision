@@ -92,7 +92,10 @@ def run_cluster() -> bool:
     log.info("Clustering complete: %d clusters, %d noise points", n_clusters, n_noise)
     db.update_phase_progress("cluster", 3, 4)
 
-    # ── Write cluster IDs back to faces ──
+    # ── Snapshot old cluster assignments before overwriting ──
+    old_labels = _snapshot_old_labels(conn)
+
+    # ── Write new cluster IDs back to faces ──
     for face_id, label in zip(face_ids, labels):
         conn.execute(
             "UPDATE faces SET cluster_id=? WHERE face_id=?",
@@ -100,18 +103,43 @@ def run_cluster() -> bool:
         )
     conn.commit()
 
-    # ── Upsert clusters table ──
+    # ── Upsert clusters table (preserves person_label + approved) ──
     now = _now()
-    for cluster_id in set(labels):
+    new_cluster_ids = set(int(l) for l in labels)
+    for cluster_id in new_cluster_ids:
         count = int(np.sum(labels == cluster_id))
         is_noise = 1 if cluster_id == -1 else 0
         conn.execute(
-            """INSERT OR REPLACE INTO clusters
-               (cluster_id, face_count, is_noise, updated_at)
-               VALUES (?, ?, ?, ?)""",
-            (int(cluster_id), count, is_noise, now)
+            """INSERT INTO clusters (cluster_id, face_count, is_noise, updated_at)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(cluster_id) DO UPDATE SET
+                 face_count = excluded.face_count,
+                 is_noise   = excluded.is_noise,
+                 updated_at = excluded.updated_at""",
+            (cluster_id, count, is_noise, now)
         )
     conn.commit()
+
+    # ── Remove stale clusters that no longer have any faces ──
+    stale = conn.execute(
+        "SELECT cluster_id FROM clusters WHERE cluster_id NOT IN ({})".format(
+            ",".join("?" * len(new_cluster_ids))
+        ),
+        list(new_cluster_ids),
+    ).fetchall()
+    if stale:
+        stale_ids = [r[0] for r in stale]
+        conn.execute(
+            "DELETE FROM clusters WHERE cluster_id IN ({})".format(
+                ",".join("?" * len(stale_ids))
+            ),
+            stale_ids,
+        )
+        conn.commit()
+        log.info("Removed %d stale clusters: %s", len(stale_ids), stale_ids)
+
+    # ── Carry forward labels from old clusters to new ones ──
+    _carry_forward_labels(conn, face_ids, labels, old_labels)
 
     # ── Auto-label clusters from ground truth anchors ──
     _auto_label_from_ground_truth(conn, face_ids, labels, photo_ids, is_gt_flags)
@@ -139,6 +167,66 @@ def run_cluster() -> bool:
         },
     )
     return True
+
+
+def _snapshot_old_labels(conn) -> dict[int, tuple[str | None, int]]:
+    """Return {face_id: (person_label, approved)} for all faces in labeled/approved clusters."""
+    rows = conn.execute(
+        """SELECT f.face_id, c.person_label, c.approved
+           FROM faces f
+           JOIN clusters c ON f.cluster_id = c.cluster_id
+           WHERE c.person_label IS NOT NULL OR c.approved = 1"""
+    ).fetchall()
+    return {r[0]: (r[1], r[2]) for r in rows}
+
+
+def _carry_forward_labels(conn, face_ids, labels, old_labels) -> None:
+    """Transfer person_label + approved from old clusters to new ones by face majority vote.
+
+    For each new cluster, look at how many of its faces came from each old
+    labeled cluster.  The old label that contributed the most faces wins.
+    Only applies when the new cluster has no label yet.
+    """
+    # Build new_cluster_id → list of (old_label, old_approved) from member faces
+    from collections import Counter as _Counter
+
+    cluster_votes: dict[int, list[tuple[str | None, int]]] = {}
+    for face_id, new_label in zip(face_ids, labels):
+        new_cid = int(new_label)
+        if new_cid == -1:
+            continue
+        if face_id in old_labels:
+            cluster_votes.setdefault(new_cid, []).append(old_labels[face_id])
+
+    carried = 0
+    for new_cid, votes in cluster_votes.items():
+        # Only carry forward if this cluster doesn't already have a label
+        row = conn.execute(
+            "SELECT person_label FROM clusters WHERE cluster_id=?", (new_cid,)
+        ).fetchone()
+        if row and row[0]:
+            continue
+
+        # Majority vote on label (ignore None votes)
+        label_votes = [v[0] for v in votes if v[0]]
+        if not label_votes:
+            continue
+        best_label, count = _Counter(label_votes).most_common(1)[0]
+        # Carry approved if majority of voters for this label were approved
+        approved_count = sum(1 for v in votes if v[0] == best_label and v[1])
+        carry_approved = 1 if approved_count > count // 2 else 0
+
+        conn.execute(
+            "UPDATE clusters SET person_label=?, approved=?, updated_at=? WHERE cluster_id=?",
+            (best_label, carry_approved, _now(), new_cid)
+        )
+        carried += 1
+        log.info("Carried label '%s' (approved=%d) → new cluster %d (%d/%d faces voted)",
+                 best_label, carry_approved, new_cid, count, len(votes))
+
+    conn.commit()
+    if carried:
+        log.info("Carried forward %d labels from previous clustering", carried)
 
 
 def _auto_label_from_ground_truth(conn, face_ids, labels, photo_ids, is_gt_flags) -> None:

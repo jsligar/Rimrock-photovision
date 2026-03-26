@@ -115,6 +115,7 @@ let autoRefreshTimer = null;
 let statusData = null;
 let _prevProgress = {};
 let _etaCache = {};
+const ETA_CACHE_TTL_MS = 90 * 1000;
 const TAB_LABELS = {
   dashboard: 'Dashboard',
   clusters: 'Cluster Review',
@@ -122,6 +123,28 @@ const TAB_LABELS = {
   photos: 'Photo Browser',
   settings: 'Settings',
 };
+
+function runningBackgroundJobs(jobs = []) {
+  return jobs.filter(job => job.status === 'running');
+}
+
+function backgroundJobErrors(jobs = []) {
+  return jobs.filter(job => job.status === 'error');
+}
+
+function backgroundJobLabel(job) {
+  if (!job) return '-';
+  return job.detail || String(job.job_name || '').replace(/_/g, ' ');
+}
+
+function backgroundJobProgress(job) {
+  if (!job) return '-';
+  if (job.progress_total > 0) {
+    const pct = Math.round((job.progress_current / job.progress_total) * 100);
+    return `${pct}% (${fmt(job.progress_current)} / ${fmt(job.progress_total)})`;
+  }
+  return job.status ? job.status.toUpperCase() : '-';
+}
 
 function renderPhaseGrid(phases, counts) {
   const grid = el('phase-grid');
@@ -137,7 +160,7 @@ function renderPhaseGrid(phases, counts) {
     const prevPhase = prevDef ? phaseMap[prevDef.id] : null;
 
     const prevOk = !prevPhase || prevPhase.status === 'complete';
-    const canRun = prevOk && p.status !== 'running';
+    const canRun = (def.id === 'process' || prevOk) && p.status !== 'running';
     const isPush = def.id === 'push';
     const isCluster = def.id === 'cluster';
 
@@ -166,6 +189,7 @@ function renderPhaseGrid(phases, counts) {
           Run
         </button>
         ${p.status === 'running' ? `<button class="btn btn-danger stop-btn" data-phase="${def.id}">Stop</button>` : ''}
+        ${def.id === 'process' && !prevOk ? '<span class="note">Can run from existing local originals</span>' : ''}
         ${isCluster ? '<span class="note">Review clusters before Organize</span>' : ''}
       </div>
     `;
@@ -213,37 +237,62 @@ function _fmtEta(minutes) {
 function _updateEtaCache(phases) {
   const now = Date.now();
   const nextPrev = {};
-  const nextEta = {};
+  const nextEta = { ..._etaCache };
+  const runningPhases = new Set();
 
   phases.forEach(p => {
-    nextPrev[p.phase] = { current: p.progress_current || 0, t: now };
+    const current = p.progress_current || 0;
+    const total = p.progress_total || 0;
+    nextPrev[p.phase] = { current, t: now };
 
-    if (p.status !== 'running' || !p.progress_total || p.progress_total <= 0) return;
+    if (p.status !== 'running' || total <= 0) return;
+    runningPhases.add(p.phase);
 
     const prev = _prevProgress[p.phase];
-    if (!prev) return;
+    if (prev) {
+      const deltaItems = current - (prev.current || 0);
+      const deltaMin = (now - prev.t) / 60000;
 
-    const deltaItems = (p.progress_current || 0) - (prev.current || 0);
-    const deltaMin = (now - prev.t) / 60000;
-    if (deltaItems <= 0 || deltaMin <= 0) return;
+      if (deltaItems > 0 && deltaMin > 0) {
+        const ratePerMin = deltaItems / deltaMin;
+        if (Number.isFinite(ratePerMin) && ratePerMin > 0) {
+          const remaining = Math.max(0, total - current);
+          nextEta[p.phase] = {
+            ratePerMin,
+            etaMinutes: remaining / ratePerMin,
+            pct: Math.round((current / total) * 100),
+            current,
+            total,
+            updatedAt: now,
+          };
+          return;
+        }
+      }
+    }
 
-    const ratePerMin = deltaItems / deltaMin;
-    if (!Number.isFinite(ratePerMin) || ratePerMin <= 0) return;
+    const cached = nextEta[p.phase];
+    if (
+      cached &&
+      Number.isFinite(cached.ratePerMin) &&
+      cached.ratePerMin > 0 &&
+      (now - (cached.updatedAt || 0)) <= ETA_CACHE_TTL_MS
+    ) {
+      const remaining = Math.max(0, total - current);
+      nextEta[p.phase] = {
+        ...cached,
+        etaMinutes: remaining / cached.ratePerMin,
+        pct: Math.round((current / total) * 100),
+        current,
+        total,
+      };
+      return;
+    }
 
-    const remaining = Math.max(0, (p.progress_total || 0) - (p.progress_current || 0));
-    const etaMinutes = remaining / ratePerMin;
-    const pct = p.progress_total > 0
-      ? Math.round(((p.progress_current || 0) / p.progress_total) * 100)
-      : 0;
+    delete nextEta[p.phase];
+  });
 
-    nextEta[p.phase] = {
-      ratePerMin,
-      etaMinutes,
-      pct,
-      current: p.progress_current || 0,
-      total: p.progress_total || 0,
-      updatedAt: now,
-    };
+  Object.keys(nextEta).forEach(phaseId => {
+    if (!runningPhases.has(phaseId)) delete nextEta[phaseId];
   });
 
   _prevProgress = nextPrev;
@@ -306,15 +355,17 @@ async function stopPipeline() {
 async function refreshStatus() {
   try {
     const data = await api('/status');
+    const bgJobs = data.background_jobs || [];
     statusData = data;
     _updateEtaCache(data.phases);
 
     renderPhaseGrid(data.phases, data.counts);
-    updateHeaderStatus(data.phases);
-    renderSidebarSnapshot(data.phases);
+    updateHeaderStatus(data.phases, bgJobs);
+    renderSidebarSnapshot(data.phases, bgJobs);
+    renderBackgroundJobs(bgJobs);
     updateLogTail();
 
-    const anyRunning = data.phases.some(p => p.status === 'running');
+    const anyRunning = data.phases.some(p => p.status === 'running') || bgJobs.some(j => j.status === 'running');
     if (anyRunning) scheduleAutoRefresh();
     else clearAutoRefresh();
   } catch (e) {
@@ -322,13 +373,17 @@ async function refreshStatus() {
   }
 }
 
-function updateHeaderStatus(phases) {
+function updateHeaderStatus(phases, bgJobs = []) {
   const running = phases.find(p => p.status === 'running');
   const errors = phases.filter(p => p.status === 'error');
+  const runningJobs = runningBackgroundJobs(bgJobs);
+  const bgErrors = backgroundJobErrors(bgJobs);
 
   let txt = 'READY';
   if (running) txt = `${running.phase.toUpperCase()} RUNNING`;
-  else if (errors.length) txt = `${errors.length} ERROR(S)`;
+  else if (runningJobs.length === 1) txt = `${backgroundJobLabel(runningJobs[0]).toUpperCase()} RUNNING`;
+  else if (runningJobs.length > 1) txt = `${runningJobs.length} BACKGROUND TASKS`;
+  else if (errors.length || bgErrors.length) txt = `${errors.length + bgErrors.length} ERROR(S)`;
 
   const statusNode = el('header-status');
   if (statusNode) statusNode.textContent = txt;
@@ -337,13 +392,19 @@ function updateHeaderStatus(phases) {
   if (sideStatus) sideStatus.textContent = txt;
 }
 
-function renderSidebarSnapshot(phases) {
+function renderSidebarSnapshot(phases, bgJobs = []) {
   const running = phases.find(p => p.status === 'running');
+  const runningJobs = runningBackgroundJobs(bgJobs);
+  const bgErrors = backgroundJobErrors(bgJobs);
   const complete = phases.filter(p => p.status === 'complete').length;
-  const errors = phases.filter(p => p.status === 'error').length;
+  const errors = phases.filter(p => p.status === 'error').length + bgErrors.length;
 
   const runNode = el('sidebar-running-phase');
-  if (runNode) runNode.textContent = running ? running.phase.toUpperCase() : '-';
+  if (runNode) {
+    runNode.textContent = running
+      ? running.phase.toUpperCase()
+      : (runningJobs[0] ? backgroundJobLabel(runningJobs[0]).toUpperCase() : '-');
+  }
 
   const completeNode = el('sidebar-complete-count');
   if (completeNode) completeNode.textContent = `${complete} / ${PHASE_DEFS.length}`;
@@ -351,14 +412,26 @@ function renderSidebarSnapshot(phases) {
   const errNode = el('sidebar-error-count');
   if (errNode) errNode.textContent = String(errors);
 
+  const machineNode = el('sidebar-machine-state');
+  if (machineNode) machineNode.textContent = (running || runningJobs.length) ? 'BUSY' : 'READY';
+
+  const bgCountNode = el('sidebar-background-count');
+  if (bgCountNode) bgCountNode.textContent = `${runningJobs.length} running`;
+
   const tickerPhase = el('ticker-phase');
-  if (tickerPhase) tickerPhase.textContent = running ? running.phase.toUpperCase() : 'Idle';
+  if (tickerPhase) {
+    tickerPhase.textContent = running
+      ? running.phase.toUpperCase()
+      : (runningJobs[0] ? backgroundJobLabel(runningJobs[0]).toUpperCase() : 'Idle');
+  }
 
   const tickerProgress = el('ticker-progress');
   if (tickerProgress) {
     if (running && running.progress_total > 0) {
       const pct = Math.round((running.progress_current / running.progress_total) * 100);
       tickerProgress.textContent = `${pct}% (${fmt(running.progress_current)} / ${fmt(running.progress_total)})`;
+    } else if (runningJobs[0]) {
+      tickerProgress.textContent = backgroundJobProgress(runningJobs[0]);
     } else {
       tickerProgress.textContent = '-';
     }
@@ -367,10 +440,39 @@ function renderSidebarSnapshot(phases) {
   const tickerThroughput = el('ticker-throughput');
   if (tickerThroughput) {
     const eta = running ? _etaCache[running.phase] : null;
-    tickerThroughput.textContent = eta
-      ? `~${Math.round(eta.ratePerMin)}/min | ETA ~${_fmtEta(eta.etaMinutes)}`
-      : '-';
+    if (eta) {
+      tickerThroughput.textContent = `~${Math.round(eta.ratePerMin)}/min | ETA ~${_fmtEta(eta.etaMinutes)}`;
+    } else if (runningJobs[0]) {
+      tickerThroughput.textContent = 'Background indexing active';
+    } else {
+      tickerThroughput.textContent = '-';
+    }
   }
+}
+
+function renderBackgroundJobs(bgJobs = []) {
+  const node = el('background-job-list');
+  if (!node) return;
+
+  const visibleJobs = bgJobs.filter(job => job.status === 'running' || job.status === 'error');
+  if (!visibleJobs.length) {
+    node.innerHTML = '<div class="bg-job bg-job--empty">No heavy background jobs</div>';
+    return;
+  }
+
+  node.innerHTML = visibleJobs.map(job => `
+    <div class="bg-job">
+      <div class="bg-job__head">
+        <span class="bg-job__name">${escHtml(backgroundJobLabel(job))}</span>
+        <span class="badge badge-${job.status}">${escHtml(String(job.status || '').toUpperCase())}</span>
+      </div>
+      <div class="bg-job__meta">
+        <span>${escHtml(backgroundJobProgress(job))}</span>
+        <span>${job.updated_at ? escHtml(fmtDate(job.updated_at)) : '-'}</span>
+      </div>
+      ${job.error_message ? `<div class="bg-job__detail">${escHtml(job.error_message)}</div>` : ''}
+    </div>
+  `).join('');
 }
 
 function updateSidebarActiveTab(tabId) {
@@ -409,22 +511,140 @@ async function updateLogTail() {
 
 let clusters = [];
 let selectedClusterIdx = 0;
+let selectedClusterId = null;
+let selectedFaceIds = new Set();
+let lastSelectedFaceIndex = null;
+const collapsedClusterGroups = new Set();
+const collapsedUntaggedGroups = new Set();
+
+function updateFaceSelectionCount() {
+  const node = el('face-selection-count');
+  if (!node) return;
+  node.textContent = `${selectedFaceIds.size} selected`;
+  const moveBtn = el('btn-reassign-faces');
+  if (moveBtn) moveBtn.disabled = selectedFaceIds.size === 0;
+}
+
+function clearFaceSelection() {
+  selectedFaceIds.clear();
+  lastSelectedFaceIndex = null;
+  document.querySelectorAll('#crop-grid .crop-tile.selected').forEach(tile => {
+    tile.classList.remove('selected');
+  });
+  updateFaceSelectionCount();
+}
+
+function refreshReassignTargets(currentClusterId = null) {
+  const sel = el('reassign-target');
+  if (!sel) return;
+  const previous = sel.value;
+  sel.innerHTML = '<option value="">Move faces to cluster...</option>';
+  clusters.forEach(c => {
+    if (!c.is_noise && c.cluster_id !== currentClusterId) {
+      const opt = document.createElement('option');
+      opt.value = c.cluster_id;
+      opt.textContent = c.person_label || `Cluster ${c.cluster_id}`;
+      sel.appendChild(opt);
+    }
+  });
+  if (previous && Array.from(sel.options).some(o => o.value === previous)) {
+    sel.value = previous;
+  }
+}
+
+function getReassignInputs() {
+  const clusterSelect = el('reassign-target');
+  const nameInput = el('reassign-name-input');
+  const targetClusterId = parseInt(clusterSelect?.value || '', 10);
+  const targetPersonLabel = (nameInput?.value || '').trim();
+  return {
+    targetClusterId: Number.isFinite(targetClusterId) ? targetClusterId : null,
+    targetPersonLabel,
+  };
+}
+
+function renderClusterSuggestions(data, clusterId) {
+  const panel = el('cluster-suggestions');
+  if (!panel) return;
+  panel.innerHTML = '';
+
+  if (data?.source_pool === 'approved_plus_labeled') {
+    const note = document.createElement('div');
+    note.className = 'dim';
+    note.textContent = 'Suggestions include pending labels to widen name options.';
+    panel.appendChild(note);
+  }
+
+  if (!data || !Array.isArray(data.suggestions) || !data.suggestions.length) {
+    const reason = data?.reason ? ` (${data.reason.replace(/_/g, ' ')})` : '';
+    panel.innerHTML = `<div class="dim">No suggestions available${reason}.</div>`;
+    return;
+  }
+
+  data.suggestions.forEach(s => {
+    const sourceState = s.source_approved ? 'approved' : 'pending';
+    const card = document.createElement('div');
+    card.className = 'suggest-card';
+    card.innerHTML = `
+      <div class="suggest-head">
+        <span class="suggest-name">${escHtml(s.person_label)}</span>
+        <span class="suggest-score">${Number(s.score).toFixed(2)}</span>
+      </div>
+      <div class="suggest-meta">src cluster ${s.source_cluster_id} | ${s.support_faces} faces | ${sourceState}</div>
+      <button class="btn" data-accept-suggestion="1" data-cluster-id="${clusterId}">Use Name</button>
+    `;
+    const useBtn = card.querySelector('button[data-accept-suggestion]');
+    if (useBtn) useBtn.dataset.name = s.person_label;
+    panel.appendChild(card);
+  });
+}
+
+async function loadClusterSuggestions(clusterId) {
+  const panel = el('cluster-suggestions');
+  if (!panel) return;
+  panel.innerHTML = '<div class="dim">Loading suggestions...</div>';
+  try {
+    const data = await api(`/clusters/${clusterId}/suggestions`);
+    renderClusterSuggestions(data, clusterId);
+  } catch (_) {
+    panel.innerHTML = '<div class="dim red">Suggestions unavailable.</div>';
+  }
+}
+
+function validateReassignDestination() {
+  const { targetClusterId, targetPersonLabel } = getReassignInputs();
+  if (targetClusterId && targetPersonLabel) {
+    showToast('Pick either target cluster OR person name, not both.', 'err');
+    return null;
+  }
+  if (!targetClusterId && !targetPersonLabel) {
+    showToast('Pick a target cluster or type a person name.', 'err');
+    return null;
+  }
+  return { targetClusterId, targetPersonLabel };
+}
 
 async function loadClusters() {
-  setEmpty('cluster-list', 'Loading clusters...');
+  setEmpty('cluster-list-tagged', 'Loading clusters...');
+  setEmpty('cluster-list-untagged', 'Loading clusters...');
   setSkeleton('crop-grid', 'crop', 12);
 
   try {
-    clusters = await api('/clusters');
+    clusters = await api('/clusters?sort=review');
+    if (selectedClusterId == null || !clusters.some(c => c.cluster_id === selectedClusterId)) {
+      selectedClusterId = clusters.length ? clusters[0].cluster_id : null;
+    }
     renderClusterList();
 
     if (clusters.length > 0) {
-      await selectCluster(0);
+      await selectClusterById(selectedClusterId);
     } else {
+      clearFaceSelection();
       setEmpty('crop-grid', 'No clusters yet. Run Process and Cluster phases.');
     }
   } catch (e) {
-    setEmpty('cluster-list', `Error: ${e.message}`, true);
+    setEmpty('cluster-list-tagged', `Error: ${e.message}`, true);
+    setEmpty('cluster-list-untagged', `Error: ${e.message}`, true);
     setEmpty('crop-grid', 'Unable to load cluster crops.', true);
   }
 }
@@ -436,32 +656,185 @@ function clusterDotClass(c) {
   return 'dot-unlabeled';
 }
 
+function clusterPriorityChip(c) {
+  if (c.is_noise) return { label: 'Noise', tone: 'noise' };
+  if (c.review_state === 'approved') return { label: 'Done', tone: 'done' };
+  if (c.review_priority_bucket === 'high') return { label: 'Now', tone: 'high' };
+  if (c.review_priority_bucket === 'medium') return { label: 'Soon', tone: 'medium' };
+  return { label: 'Later', tone: 'low' };
+}
+
+function clusterMetaLine(c) {
+  const parts = [];
+  const rank = Number(c.review_priority_rank);
+  if (!c.is_noise && c.review_state !== 'approved' && Number.isFinite(rank)) {
+    parts.push(`Q${rank}`);
+  }
+  if (c.review_state === 'labeled_pending') {
+    parts.push('awaiting approval');
+  } else if (c.review_state === 'unlabeled') {
+    parts.push('needs label');
+  }
+  if (c.is_mega_cluster) {
+    parts.push('mega');
+  }
+  const conf = Number(c.avg_detection_score);
+  if (Number.isFinite(conf) && conf > 0) {
+    parts.push(`${Math.round(conf * 100)}% conf`);
+  }
+  return parts.join(' | ');
+}
+
 function renderClusterList() {
-  const list = el('cluster-list');
-  if (!list) return;
-  list.innerHTML = '';
+  const taggedList = el('cluster-list-tagged');
+  const untaggedList = el('cluster-list-untagged');
+  if (!taggedList || !untaggedList) return;
+  taggedList.innerHTML = '';
+  untaggedList.innerHTML = '';
 
   const labeled = clusters.filter(c => c.person_label && !c.is_noise).length;
   const total = clusters.filter(c => !c.is_noise).length;
+  const queued = clusters.filter(c => !c.is_noise && c.review_state !== 'approved').length;
   const progressNode = el('cluster-progress');
-  if (progressNode) progressNode.textContent = `${labeled} / ${total} labeled`;
+  if (progressNode) progressNode.textContent = `${labeled} / ${total} labeled | ${queued} queued`;
 
   if (clusters.length === 0) {
-    setEmpty('cluster-list', 'No clusters found.');
+    setEmpty('cluster-list-tagged', 'No tagged clusters.');
+    setEmpty('cluster-list-untagged', 'No clusters found.');
     return;
   }
 
-  clusters.forEach((c, i) => {
+  const tagged = clusters
+    .filter(c => c.person_label && !c.is_noise)
+    .sort((a, b) => {
+      const nameCmp = String(a.person_label || '').localeCompare(String(b.person_label || ''), undefined, {
+        sensitivity: 'base',
+      });
+      if (nameCmp !== 0) return nameCmp;
+      return (Number(b.face_count) || 0) - (Number(a.face_count) || 0)
+        || (Number(a.cluster_id) || 0) - (Number(b.cluster_id) || 0);
+    });
+  const untagged = clusters.filter(c => !c.person_label || c.is_noise);
+
+  const renderItem = (c, mountNode) => {
     const div = document.createElement('div');
-    div.className = 'sidebar-item' + (i === selectedClusterIdx ? ' active' : '');
+    div.className = 'sidebar-item' + (c.cluster_id === selectedClusterId ? ' active' : '');
+    div.dataset.clusterId = String(c.cluster_id);
+    const meta = clusterMetaLine(c);
+    const chip = clusterPriorityChip(c);
     div.innerHTML = `
       <span class="status-dot ${clusterDotClass(c)}"></span>
-      <span class="item-label">${escHtml(c.person_label || `Cluster ${c.cluster_id}`)}</span>
+      <span class="item-main">
+        <span class="item-label">${escHtml(c.person_label || `Cluster ${c.cluster_id}`)}</span>
+        ${meta ? `<span class="item-meta">${escHtml(meta)}</span>` : ''}
+      </span>
+      ${chip ? `<span class="priority-chip priority-chip--${chip.tone}">${escHtml(chip.label)}</span>` : ''}
       <span class="item-count">${c.face_count}</span>
     `;
-    div.addEventListener('click', () => selectCluster(i));
-    list.appendChild(div);
+    div.addEventListener('click', () => selectClusterById(c.cluster_id));
+    mountNode.appendChild(div);
+  };
+
+  const taggedGroups = new Map();
+  tagged.forEach(c => {
+    const name = (c.person_label || '').trim();
+    const key = name.toLowerCase();
+    if (!taggedGroups.has(key)) taggedGroups.set(key, { name, items: [] });
+    taggedGroups.get(key).items.push(c);
   });
+
+  Array.from(taggedGroups.entries())
+    .sort((a, b) => a[1].name.localeCompare(b[1].name, undefined, { sensitivity: 'base' }))
+    .forEach(([key, group]) => {
+      const wrap = document.createElement('section');
+      wrap.className = 'cluster-group';
+
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'cluster-group-toggle';
+      const isCollapsed = collapsedClusterGroups.has(key);
+      button.setAttribute('aria-expanded', isCollapsed ? 'false' : 'true');
+      button.innerHTML = `
+        <span class="cluster-group-title">${escHtml(group.name || 'Unnamed')}</span>
+        <span class="cluster-group-meta">${group.items.length}</span>
+      `;
+      button.addEventListener('click', () => {
+        if (collapsedClusterGroups.has(key)) {
+          collapsedClusterGroups.delete(key);
+        } else {
+          collapsedClusterGroups.add(key);
+        }
+        renderClusterList();
+      });
+      wrap.appendChild(button);
+
+      const body = document.createElement('div');
+      body.className = 'cluster-group-body' + (isCollapsed ? ' collapsed' : '');
+      group.items.forEach(c => renderItem(c, body));
+      wrap.appendChild(body);
+      taggedList.appendChild(wrap);
+    });
+
+  const pendingClusters = untagged
+    .filter(c => !c.is_noise)
+    .sort((a, b) => {
+      return (Number(a.review_priority_rank) || Number.MAX_SAFE_INTEGER)
+        - (Number(b.review_priority_rank) || Number.MAX_SAFE_INTEGER)
+        || (Number(b.face_count) || 0) - (Number(a.face_count) || 0)
+        || (Number(a.cluster_id) || 0) - (Number(b.cluster_id) || 0);
+    });
+  const noiseClusters = untagged
+    .filter(c => c.is_noise)
+    .sort((a, b) => (Number(b.face_count) || 0) - (Number(a.face_count) || 0)
+      || (Number(a.cluster_id) || 0) - (Number(b.cluster_id) || 0));
+
+  const untaggedGroups = [
+    { key: 'pending', name: 'Pending Queue', items: pendingClusters },
+    { key: 'noise', name: 'Noise', items: noiseClusters },
+  ];
+
+  untaggedGroups.forEach(group => {
+    const wrap = document.createElement('section');
+    wrap.className = 'cluster-group';
+
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'cluster-group-toggle';
+    const isCollapsed = collapsedUntaggedGroups.has(group.key);
+    button.setAttribute('aria-expanded', isCollapsed ? 'false' : 'true');
+    button.innerHTML = `
+      <span class="cluster-group-title">${escHtml(group.name)}</span>
+      <span class="cluster-group-meta">${group.items.length}</span>
+    `;
+    button.addEventListener('click', () => {
+      if (collapsedUntaggedGroups.has(group.key)) {
+        collapsedUntaggedGroups.delete(group.key);
+      } else {
+        collapsedUntaggedGroups.add(group.key);
+      }
+      renderClusterList();
+    });
+    wrap.appendChild(button);
+
+    const body = document.createElement('div');
+    body.className = 'cluster-group-body' + (isCollapsed ? ' collapsed' : '');
+    if (group.items.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'cluster-group-empty';
+      empty.textContent = `No ${group.name.toLowerCase()} clusters.`;
+      body.appendChild(empty);
+    } else {
+      group.items.forEach(c => renderItem(c, body));
+    }
+    wrap.appendChild(body);
+    untaggedList.appendChild(wrap);
+  });
+
+  if (!tagged.length) setEmpty('cluster-list-tagged', 'No tagged clusters.');
+  if (!untagged.length) {
+    collapsedUntaggedGroups.delete('pending');
+    collapsedUntaggedGroups.delete('noise');
+  }
 
   const sel = el('merge-target');
   if (sel) {
@@ -475,15 +848,24 @@ function renderClusterList() {
       }
     });
   }
+  refreshReassignTargets(selectedClusterId);
+}
+
+async function selectClusterById(clusterId) {
+  if (clusterId == null) return;
+  const idx = clusters.findIndex(c => c.cluster_id === clusterId);
+  if (idx < 0) return;
+  await selectCluster(idx);
 }
 
 async function selectCluster(idx) {
   selectedClusterIdx = idx;
   const c = clusters[idx];
   if (!c) return;
+  selectedClusterId = c.cluster_id;
 
-  document.querySelectorAll('#cluster-list .sidebar-item').forEach((node, i) => {
-    node.classList.toggle('active', i === idx);
+  document.querySelectorAll('.cluster-column .sidebar-item').forEach(node => {
+    node.classList.toggle('active', node.dataset.clusterId === String(selectedClusterId));
   });
 
   const toolbar = el('cluster-toolbar');
@@ -491,6 +873,9 @@ async function selectCluster(idx) {
 
   const nameInput = el('cluster-name-input');
   if (nameInput) nameInput.value = c.person_label || '';
+  clearFaceSelection();
+  refreshReassignTargets(c.cluster_id);
+  loadClusterSuggestions(c.cluster_id);
 
   setSkeleton('crop-grid', 'crop', 12);
 
@@ -508,10 +893,39 @@ async function selectCluster(idx) {
     crops.forEach(crop => {
       const tile = document.createElement('div');
       tile.className = 'crop-tile';
+      tile.dataset.faceId = String(crop.face_id);
+      tile.dataset.faceIndex = String(grid.children.length);
       tile.innerHTML = `
-        <img src="${crop.crop_url || ''}" alt="" loading="lazy" onerror="this.style.display='none'" />
+        <img src="${crop.crop_url || ''}" alt="" />
+        <div class="pick-indicator">&#10003;</div>
         <div class="score">${(crop.detection_score || 0).toFixed(2)}</div>
       `;
+      tile.addEventListener('click', (evt) => {
+        const faceId = Number(tile.dataset.faceId);
+        const faceIndex = Number(tile.dataset.faceIndex);
+        if (!faceId) return;
+
+        if (evt.shiftKey && lastSelectedFaceIndex != null) {
+          const lo = Math.min(lastSelectedFaceIndex, faceIndex);
+          const hi = Math.max(lastSelectedFaceIndex, faceIndex);
+          document.querySelectorAll('#crop-grid .crop-tile').forEach(node => {
+            const idx = Number(node.dataset.faceIndex);
+            const id = Number(node.dataset.faceId);
+            if (idx >= lo && idx <= hi && id) {
+              selectedFaceIds.add(id);
+              node.classList.add('selected');
+            }
+          });
+        } else if (selectedFaceIds.has(faceId)) {
+          selectedFaceIds.delete(faceId);
+          tile.classList.remove('selected');
+        } else {
+          selectedFaceIds.add(faceId);
+          tile.classList.add('selected');
+        }
+        lastSelectedFaceIndex = faceIndex;
+        updateFaceSelectionCount();
+      });
       grid.appendChild(tile);
     });
   } catch (_) {
@@ -533,10 +947,127 @@ el('btn-approve-cluster').addEventListener('click', async () => {
     }
     await apiPost(`/clusters/${c.cluster_id}/approve`);
     await loadClusters();
-    if (selectedClusterIdx < clusters.length) await selectCluster(selectedClusterIdx);
     showToast('Cluster approved.', 'ok');
   } catch (e) {
     showToast('Failed to approve cluster.', 'err');
+  } finally {
+    setBusy(button, false);
+  }
+});
+
+el('btn-clear-face-selection').addEventListener('click', () => clearFaceSelection());
+
+el('btn-select-all-faces').addEventListener('click', () => {
+  document.querySelectorAll('#crop-grid .crop-tile').forEach(tile => {
+    const faceId = Number(tile.dataset.faceId);
+    if (!faceId) return;
+    selectedFaceIds.add(faceId);
+    tile.classList.add('selected');
+  });
+  updateFaceSelectionCount();
+});
+
+el('btn-reassign-faces').addEventListener('click', async () => {
+  const c = clusters[selectedClusterIdx];
+  if (!c) return;
+  if (!selectedFaceIds.size) {
+    showToast('Select one or more faces first.', 'err');
+    return;
+  }
+
+  const destination = validateReassignDestination();
+  if (!destination) return;
+
+  const button = el('btn-reassign-faces');
+  setBusy(button, true);
+  try {
+    const destinationLabel = destination.targetClusterId
+      ? `cluster ${destination.targetClusterId}`
+      : `"${destination.targetPersonLabel}"`;
+    const confirmed = window.confirm(
+      `Move ${selectedFaceIds.size} face(s) from cluster ${c.cluster_id} to ${destinationLabel}?`
+    );
+    if (!confirmed) return;
+
+    const payload = {
+      source_cluster_id: c.cluster_id,
+      face_ids: Array.from(selectedFaceIds),
+      target_cluster_id: destination.targetClusterId,
+      target_person_label: destination.targetPersonLabel || null,
+    };
+    const result = await apiPost('/clusters/reassign-faces', payload);
+    clearFaceSelection();
+    if (el('reassign-name-input')) el('reassign-name-input').value = '';
+    if (el('reassign-target')) el('reassign-target').value = '';
+    await loadClusters();
+    if (result && Number.isFinite(result.target_cluster_id)) {
+      await selectClusterById(result.target_cluster_id);
+    }
+    showToast(`Moved ${payload.face_ids.length} face(s) to cluster ${result.target_cluster_id}.`, 'ok');
+  } catch (_) {
+    showToast('Failed to reassign selected faces.', 'err');
+  } finally {
+    setBusy(button, false);
+  }
+});
+
+el('btn-undo-last-move').addEventListener('click', async () => {
+  const confirmed = window.confirm('Undo the most recent face reassignment?');
+  if (!confirmed) return;
+
+  const button = el('btn-undo-last-move');
+  setBusy(button, true);
+  try {
+    const r = await apiPost('/clusters/reassign-faces/undo-last');
+    await loadClusters();
+    if (r && Number.isFinite(r.source_cluster_id)) {
+      await selectClusterById(r.source_cluster_id);
+    }
+    showToast(`Undid move ${r.move_id} (${r.moved_faces} face(s)).`, 'ok');
+  } catch (_) {
+    showToast('No move available to undo.', 'err');
+  } finally {
+    setBusy(button, false);
+  }
+});
+
+el('btn-untag-cluster').addEventListener('click', async () => {
+  const c = clusters[selectedClusterIdx];
+  if (!c) return;
+
+  const button = el('btn-untag-cluster');
+  setBusy(button, true);
+
+  try {
+    if (selectedFaceIds.size > 0) {
+      const count = selectedFaceIds.size;
+      const confirmed = window.confirm(
+        `Untag ${count} selected face(s) and move them to a new unlabeled cluster?`
+      );
+      if (!confirmed) return;
+
+      const result = await apiPost(`/clusters/${c.cluster_id}/untag-faces`, {
+        face_ids: Array.from(selectedFaceIds),
+      });
+      clearFaceSelection();
+      await loadClusters();
+      if (result && Number.isFinite(result.target_cluster_id)) {
+        await selectClusterById(result.target_cluster_id);
+      }
+      showToast(`Untagged ${result?.moved_faces || count} selected face(s).`, 'ok');
+      return;
+    }
+
+    const confirmed = window.confirm(
+      `No faces selected. Untag the entire cluster ${c.cluster_id}?`
+    );
+    if (!confirmed) return;
+
+    await apiPost(`/clusters/${c.cluster_id}/untag`);
+    await loadClusters();
+    showToast('Cluster untagged.', 'ok');
+  } catch (e) {
+    showToast('Failed to untag cluster.', 'err');
   } finally {
     setBusy(button, false);
   }
@@ -552,7 +1083,6 @@ el('btn-noise-cluster').addEventListener('click', async () => {
   try {
     await apiPost(`/clusters/${c.cluster_id}/noise`);
     await loadClusters();
-    if (selectedClusterIdx < clusters.length) await selectCluster(selectedClusterIdx);
     showToast('Cluster marked as noise.', 'ok');
   } catch (e) {
     showToast('Failed to update cluster.', 'err');
@@ -580,7 +1110,6 @@ el('btn-merge-cluster').addEventListener('click', async () => {
       target_cluster_id: targetId,
     });
     await loadClusters();
-    if (clusters.length) await selectCluster(0);
     showToast('Clusters merged.', 'ok');
   } catch (e) {
     showToast('Failed to merge clusters.', 'err');
@@ -592,11 +1121,24 @@ el('btn-merge-cluster').addEventListener('click', async () => {
 document.addEventListener('keydown', e => {
   if (isPaletteOpen()) return;
   if (!el('tab-clusters').classList.contains('active')) return;
+  if (e.key === 'Escape') {
+    clearFaceSelection();
+    return;
+  }
+  if ((e.ctrlKey || e.metaKey) && (e.key === 'a' || e.key === 'A')) {
+    e.preventDefault();
+    el('btn-select-all-faces').click();
+    return;
+  }
   if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
 
   switch (e.key) {
     case 'Enter':
       el('btn-approve-cluster').click();
+      break;
+    case 'u':
+    case 'U':
+      el('btn-untag-cluster').click();
       break;
     case 'n':
     case 'N':
@@ -610,6 +1152,41 @@ document.addEventListener('keydown', e => {
       break;
     default:
       break;
+  }
+});
+
+el('reassign-target')?.addEventListener('change', () => {
+  if ((el('reassign-target')?.value || '') && el('reassign-name-input')) {
+    el('reassign-name-input').value = '';
+  }
+});
+
+el('reassign-name-input')?.addEventListener('input', () => {
+  if ((el('reassign-name-input')?.value || '').trim() && el('reassign-target')) {
+    el('reassign-target').value = '';
+  }
+});
+
+el('cluster-suggestions')?.addEventListener('click', async (evt) => {
+  const btn = evt.target.closest('button[data-accept-suggestion]');
+  if (!btn) return;
+  const clusterId = parseInt(btn.dataset.clusterId, 10);
+  const personLabel = btn.dataset.name || '';
+  if (!clusterId || !personLabel) return;
+
+  const confirmed = window.confirm(`Use suggested name "${personLabel}" for cluster ${clusterId}?`);
+  if (!confirmed) return;
+
+  setBusy(btn, true);
+  try {
+    await apiPost(`/clusters/${clusterId}/accept-suggestion`, { person_label: personLabel });
+    await loadClusters();
+    await selectClusterById(clusterId);
+    showToast(`Applied suggestion: ${personLabel}`, 'ok');
+  } catch (_) {
+    showToast('Failed to apply suggestion.', 'err');
+  } finally {
+    setBusy(btn, false);
   }
 });
 
@@ -1335,14 +1912,35 @@ async function approveDetection(id) {
   }
 }
 
+function bindSlider(sliderId, displayId, formatter) {
+  const s = el(sliderId);
+  const d = el(displayId);
+  const fmt = formatter || (v => v);
+  d.textContent = fmt(s.value);
+  s.addEventListener('input', () => { d.textContent = fmt(s.value); });
+}
+
 async function loadSettings() {
   try {
     const s = await api('/settings');
     el('s-nas-dir').value = s.nas_source_dir || '';
     el('s-local-base').value = s.local_base || '';
-    el('s-yolo-conf').value = s.yolo_conf_threshold || 0.45;
-    el('s-clip-thresh').value = s.clip_tag_threshold || 0.26;
-    el('s-max-dim').value = s.max_inference_dim || 1920;
+
+    el('s-yolo-conf').value = s.yolo_conf_threshold ?? 0.45;
+    el('s-clip-thresh').value = s.clip_tag_threshold ?? 0.26;
+    el('s-max-dim').value = s.max_inference_dim ?? 1920;
+    el('s-det-thresh').value = s.det_thresh ?? 0.4;
+    el('s-umap-neighbors').value = s.umap_n_neighbors ?? 30;
+    el('s-hdbscan-min-cluster').value = s.hdbscan_min_cluster_size ?? 3;
+    el('s-hdbscan-min-samples').value = s.hdbscan_min_samples ?? 1;
+
+    bindSlider('s-yolo-conf', 'v-yolo-conf');
+    bindSlider('s-clip-thresh', 'v-clip-thresh');
+    bindSlider('s-max-dim', 'v-max-dim', v => `${v}px`);
+    bindSlider('s-det-thresh', 'v-det-thresh');
+    bindSlider('s-umap-neighbors', 'v-umap-neighbors');
+    bindSlider('s-hdbscan-min-cluster', 'v-hdbscan-min-cluster');
+    bindSlider('s-hdbscan-min-samples', 'v-hdbscan-min-samples');
 
     const stats = el('stats-rows');
     stats.innerHTML = `
@@ -1364,6 +1962,10 @@ el('btn-save-settings').addEventListener('click', async () => {
     yolo_conf_threshold: parseFloat(el('s-yolo-conf').value) || null,
     clip_tag_threshold: parseFloat(el('s-clip-thresh').value) || null,
     max_inference_dim: parseInt(el('s-max-dim').value, 10) || null,
+    det_thresh: parseFloat(el('s-det-thresh').value) || null,
+    umap_n_neighbors: parseInt(el('s-umap-neighbors').value, 10) || null,
+    hdbscan_min_cluster_size: parseInt(el('s-hdbscan-min-cluster').value, 10) || null,
+    hdbscan_min_samples: parseInt(el('s-hdbscan-min-samples').value, 10) || null,
   };
 
   const button = el('btn-save-settings');
@@ -1374,6 +1976,46 @@ el('btn-save-settings').addEventListener('click', async () => {
     showToast(r.note || 'Settings saved.', 'ok');
   } catch (e) {
     showToast('Save failed.', 'err');
+  } finally {
+    setBusy(button, false);
+  }
+});
+
+el('btn-clear-db').addEventListener('click', async () => {
+  const typed = window.prompt('This is destructive. Type CLEAR to reset the database.');
+  if (typed !== 'CLEAR') {
+    showToast('Clear DB cancelled.', 'err');
+    return;
+  }
+
+  const button = el('btn-clear-db');
+  setBusy(button, true);
+
+  try {
+    const r = await apiPost('/settings/clear-db', {});
+    showToast(r.note || 'Database cleared.', 'ok');
+
+    if (el('photo-modal').classList.contains('open')) {
+      el('photo-modal').classList.remove('open');
+      activeModalPhotoId = null;
+    }
+
+    // Reset client-side context and refresh all count-driven views.
+    selectedTag = null;
+    objPage = 1;
+    photoPage = 1;
+    selectedClusterId = null;
+    selectedClusterIdx = 0;
+    clearFaceSelection();
+
+    await refreshStatus();
+    await loadSettings();
+    await refreshPhotoFilters(false);
+    if (activeTab === 'photos') await loadPhotos(1);
+    if (activeTab === 'objects') await loadTagBrowser();
+    if (activeTab === 'clusters') await loadClusters();
+  } catch (e) {
+    showToast(`Clear DB failed: ${e.message}`, 'err');
   } finally {
     setBusy(button, false);
   }
@@ -1470,10 +2112,145 @@ function escHtml(str) {
     .replace(/"/g, '&quot;');
 }
 
+// ── Search Layer (gated by settings.search_layer_enabled) ───────────────────
+
+let _searchLayerEnabled = false;
+let _lastSearchQuery = '';
+
+async function initSearchLayer() {
+  try {
+    const settings = await api('/settings');
+    if (!settings.search_layer_enabled) return;
+    _searchLayerEnabled = true;
+
+    el('semantic-search-bar').style.display = '';
+
+    el('btn-search').addEventListener('click', runSemanticSearch);
+    el('search-input').addEventListener('keydown', e => {
+      if (e.key === 'Enter') { e.preventDefault(); runSemanticSearch(); }
+    });
+    el('btn-search-clear').addEventListener('click', clearSemanticSearch);
+    el('btn-search-save').addEventListener('click', saveCurrentSearch);
+
+    await refreshSavedSearches();
+  } catch (_) { /* search layer not available */ }
+}
+
+async function runSemanticSearch() {
+  const q = (el('search-input').value || '').trim();
+  if (!q) return;
+  _lastSearchQuery = q;
+
+  setSkeleton('photo-grid', 'thumb', 15);
+  el('photo-pagination').innerHTML = '';
+  el('search-result-count').textContent = '';
+  el('btn-search-clear').style.display = '';
+  el('btn-search-save').style.display = '';
+
+  try {
+    const data = await api(`/photos/search?q=${encodeURIComponent(q)}&top_k=60`);
+    el('search-result-count').textContent = `${data.total} results`;
+
+    renderPhotoGrid('photo-grid', data.results);
+    renderSearchFacets(data.facets || {});
+  } catch (e) {
+    setEmpty('photo-grid', `Search error: ${e.message}`, true);
+    el('search-facets').style.display = 'none';
+  }
+}
+
+function clearSemanticSearch() {
+  el('search-input').value = '';
+  el('search-result-count').textContent = '';
+  el('btn-search-clear').style.display = 'none';
+  el('btn-search-save').style.display = 'none';
+  el('search-facets').style.display = 'none';
+  _lastSearchQuery = '';
+  loadPhotos(1);
+}
+
+function renderSearchFacets(facets) {
+  const panel = el('search-facets');
+  if (!facets || (!facets.tags?.length && !facets.people?.length && !facets.years?.length)) {
+    panel.style.display = 'none';
+    return;
+  }
+  panel.style.display = '';
+
+  _renderFacetGroup('facet-people', 'People', facets.people || [], item => {
+    el('filter-person').value = item.person;
+    loadPhotos(1);
+  }, 'person');
+
+  _renderFacetGroup('facet-tags', 'Tags', facets.tags || [], item => {
+    el('filter-tag').value = item.tag;
+    loadPhotos(1);
+  }, 'tag');
+
+  _renderFacetGroup('facet-years', 'Years', facets.years || [], item => {
+    el('filter-year').value = item.year;
+    loadPhotos(1);
+  }, 'year');
+}
+
+function _renderFacetGroup(containerId, label, items, onClick, labelKey) {
+  const container = el(containerId);
+  container.innerHTML = `<h5>${label}</h5>`;
+  if (!items.length) { container.style.display = 'none'; return; }
+  container.style.display = '';
+
+  items.forEach(item => {
+    const row = document.createElement('div');
+    row.className = 'facet-item';
+    row.innerHTML = `<span>${escHtml(item[labelKey])}</span><span class="facet-count">${item.count}</span>`;
+    row.addEventListener('click', () => onClick(item));
+    container.appendChild(row);
+  });
+}
+
+async function refreshSavedSearches() {
+  const sel = el('search-saved');
+  if (!sel) return;
+  try {
+    const searches = await api('/searches');
+    sel.innerHTML = '<option value="">Saved searches...</option>';
+    if (!searches.length) { sel.style.display = 'none'; return; }
+    sel.style.display = '';
+    searches.forEach(s => {
+      const opt = document.createElement('option');
+      opt.value = JSON.stringify(s.query);
+      opt.textContent = s.name;
+      sel.appendChild(opt);
+    });
+    sel.onchange = () => {
+      if (!sel.value) return;
+      const query = JSON.parse(sel.value);
+      if (query.q) {
+        el('search-input').value = query.q;
+        runSemanticSearch();
+      }
+      sel.value = '';
+    };
+  } catch (_) { sel.style.display = 'none'; }
+}
+
+async function saveCurrentSearch() {
+  if (!_lastSearchQuery) return;
+  const name = prompt('Name this search:', _lastSearchQuery);
+  if (!name) return;
+  try {
+    await apiPost('/searches', { name, query: { q: _lastSearchQuery } });
+    await refreshSavedSearches();
+  } catch (e) {
+    alert(`Failed to save: ${e.message}`);
+  }
+}
+
 (async () => {
   updateSidebarActiveTab('dashboard');
   renderSidebarSnapshot(PHASE_DEFS.map(p => ({ phase: p.id, status: 'pending' })));
   await refreshStatus();
   await initPhotoFilters();
+  await initSearchLayer();
   scheduleAutoRefresh();
 })();

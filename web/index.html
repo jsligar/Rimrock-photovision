@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Rimrock Photo Tagger</title>
-  <link rel="stylesheet" href="/style.css" />
+  <link rel="stylesheet" href="/style.css?v=20260325b" />
 </head>
 <body>
   <div class="app-shell">
@@ -49,6 +49,23 @@
             <span class="dim">Active Tab</span>
             <strong id="sidebar-active-tab">Dashboard</strong>
           </div>
+        </div>
+      </section>
+
+      <section class="rail-card">
+        <h3>Background Load</h3>
+        <div class="rail-stats">
+          <div class="rail-stat">
+            <span class="dim">Machine</span>
+            <strong id="sidebar-machine-state">READY</strong>
+          </div>
+          <div class="rail-stat">
+            <span class="dim">Tasks</span>
+            <strong id="sidebar-background-count">0 running</strong>
+          </div>
+        </div>
+        <div class="bg-job-list" id="background-job-list">
+          <div class="bg-job bg-job--empty">No heavy background jobs</div>
         </div>
       </section>
 
@@ -99,11 +116,18 @@
         </div>
 
         <div id="tab-clusters" class="tab-pane">
-          <div class="split-layout">
+          <div class="split-layout split-layout--clusters">
             <aside class="sidebar">
               <div class="sidebar-header">Clusters <span id="cluster-progress" class="dim">-</span></div>
-              <div class="sidebar-list" id="cluster-list">
-                <div class="empty-state">Loading clusters...</div>
+              <div class="sidebar-list cluster-columns">
+                <section class="cluster-column">
+                  <div class="cluster-column-header">Tagged</div>
+                  <div id="cluster-list-tagged"></div>
+                </section>
+                <section class="cluster-column">
+                  <div class="cluster-column-header">Untagged</div>
+                  <div id="cluster-list-untagged"></div>
+                </section>
               </div>
             </aside>
 
@@ -111,12 +135,25 @@
               <div class="pane-toolbar" id="cluster-toolbar" style="display:none;">
                 <input type="text" id="cluster-name-input" placeholder="Person name..." />
                 <button class="btn btn-accent" id="btn-approve-cluster">Approve</button>
+                <button class="btn" id="btn-untag-cluster">Untag</button>
                 <button class="btn btn-danger" id="btn-noise-cluster">Noise</button>
                 <select class="merge-select" id="merge-target">
                   <option value="">Merge into...</option>
                 </select>
                 <button class="btn" id="btn-merge-cluster">Merge</button>
-                <span class="dim toolbar-tip">[Enter]=approve [N]=noise [Arrows]=nav</span>
+                <select class="merge-select" id="reassign-target">
+                  <option value="">Move faces to cluster...</option>
+                </select>
+                <input type="text" id="reassign-name-input" placeholder="or type person name..." />
+                <button class="btn" id="btn-reassign-faces">Move Selected Faces</button>
+                <button class="btn" id="btn-undo-last-move">Undo Last Move</button>
+                <button class="btn" id="btn-select-all-faces">Select All</button>
+                <button class="btn" id="btn-clear-face-selection">Clear</button>
+                <span class="dim mono" id="face-selection-count">0 selected</span>
+                <span class="dim toolbar-tip">[Enter]=approve [U]=untag selected (or whole cluster if none selected) [N]=noise [Arrows]=nav [Shift+Click]=range select [Esc]=clear selection</span>
+              </div>
+              <div class="cluster-suggest-panel" id="cluster-suggestions">
+                <div class="dim">Suggestions loading...</div>
               </div>
               <div class="pane-scroll">
                 <div class="crop-grid" id="crop-grid">
@@ -182,6 +219,17 @@
 
         <div id="tab-photos" class="tab-pane">
           <section class="panel">
+            <div class="semantic-search" id="semantic-search-bar" style="display:none">
+              <input type="text" id="search-input"
+                     placeholder="Describe what you're looking for... e.g. 'sunset with dog'" />
+              <button class="btn btn-accent" id="btn-search">Search</button>
+              <button class="btn btn-ghost" id="btn-search-clear" style="display:none">Clear</button>
+              <select id="search-saved" style="display:none">
+                <option value="">Saved searches...</option>
+              </select>
+              <button class="btn btn-ghost" id="btn-search-save" style="display:none" title="Save current search">Save</button>
+              <span id="search-result-count" class="mono dim"></span>
+            </div>
             <div class="quick-search">
               <input
                 type="text"
@@ -202,8 +250,24 @@
               <button class="btn" id="btn-apply-filters">Apply</button>
               <span id="photo-count" class="mono dim filter-count"></span>
             </div>
-            <div class="photo-grid" id="photo-grid"></div>
-            <div class="pagination" id="photo-pagination"></div>
+            <div class="photos-layout">
+              <aside class="search-facets" id="search-facets" style="display:none">
+                <h4 class="facet-heading">Refine Results</h4>
+                <div class="facet-group" id="facet-people">
+                  <h5>People</h5>
+                </div>
+                <div class="facet-group" id="facet-tags">
+                  <h5>Tags</h5>
+                </div>
+                <div class="facet-group" id="facet-years">
+                  <h5>Years</h5>
+                </div>
+              </aside>
+              <div class="photos-main">
+                <div class="photo-grid" id="photo-grid"></div>
+                <div class="pagination" id="photo-pagination"></div>
+              </div>
+            </div>
           </section>
         </div>
 
@@ -222,26 +286,78 @@
             </section>
 
             <section class="settings-card">
-              <h3>Inference Thresholds</h3>
+              <h3>Detection</h3>
               <div class="field-group">
-                <label>YOLO Confidence Threshold (0-1)</label>
-                <input type="number" id="s-yolo-conf" step="0.01" min="0.01" max="0.99" />
+                <div class="slider-head">
+                  <label>YOLO Confidence</label>
+                  <span class="slider-val" id="v-yolo-conf"></span>
+                </div>
+                <input type="range" id="s-yolo-conf" min="0.10" max="0.95" step="0.01" />
+                <p class="field-hint">Minimum confidence for object detections. Higher = fewer but more accurate detections.</p>
               </div>
               <div class="field-group">
-                <label>CLIP Similarity Threshold (0-1)</label>
-                <input type="number" id="s-clip-thresh" step="0.01" min="0.01" max="0.99" />
+                <div class="slider-head">
+                  <label>CLIP Similarity</label>
+                  <span class="slider-val" id="v-clip-thresh"></span>
+                </div>
+                <input type="range" id="s-clip-thresh" min="0.10" max="0.50" step="0.01" />
+                <p class="field-hint">Minimum CLIP score to apply a scene/object tag. Lower = more tags but more false positives.</p>
               </div>
               <div class="field-group">
-                <label>Max Inference Dimension (px)</label>
-                <input type="number" id="s-max-dim" step="64" min="320" max="4096" />
+                <div class="slider-head">
+                  <label>Max Inference Dimension</label>
+                  <span class="slider-val" id="v-max-dim"></span>
+                </div>
+                <input type="range" id="s-max-dim" min="640" max="3840" step="64" />
+                <p class="field-hint">Photos are resized to this max edge length before inference. Lower = faster but less detail.</p>
+              </div>
+            </section>
+
+            <section class="settings-card">
+              <h3>Face Clustering</h3>
+              <div class="field-group">
+                <div class="slider-head">
+                  <label>Face Detection Threshold</label>
+                  <span class="slider-val" id="v-det-thresh"></span>
+                </div>
+                <input type="range" id="s-det-thresh" min="0.10" max="0.90" step="0.01" />
+                <p class="field-hint">InsightFace detection confidence. Lower finds more faces but picks up more false positives.</p>
+              </div>
+              <div class="field-group">
+                <div class="slider-head">
+                  <label>UMAP Neighbors</label>
+                  <span class="slider-val" id="v-umap-neighbors"></span>
+                </div>
+                <input type="range" id="s-umap-neighbors" min="5" max="100" step="1" />
+                <p class="field-hint">How many nearby faces UMAP considers when reducing dimensions. Higher = broader groupings, lower = tighter local structure.</p>
+              </div>
+              <div class="field-group">
+                <div class="slider-head">
+                  <label>Min Cluster Size</label>
+                  <span class="slider-val" id="v-hdbscan-min-cluster"></span>
+                </div>
+                <input type="range" id="s-hdbscan-min-cluster" min="2" max="25" step="1" />
+                <p class="field-hint">Smallest group HDBSCAN will form into a cluster. Higher = fewer clusters with more faces each. Lower = catches rare faces but creates more noise.</p>
+              </div>
+              <div class="field-group">
+                <div class="slider-head">
+                  <label>Min Samples</label>
+                  <span class="slider-val" id="v-hdbscan-min-samples"></span>
+                </div>
+                <input type="range" id="s-hdbscan-min-samples" min="1" max="15" step="1" />
+                <p class="field-hint">How conservative HDBSCAN is about core points. Higher = denser clusters with more outliers marked as noise.</p>
               </div>
             </section>
 
             <section class="settings-card settings-card--wide">
               <div class="settings-head">
                 <h3>System Stats</h3>
-                <button class="btn btn-accent" id="btn-save-settings">Save Settings</button>
+                <div class="settings-actions">
+                  <button class="btn btn-accent" id="btn-save-settings">Save Settings</button>
+                  <button class="btn btn-danger" id="btn-clear-db">Clear DB</button>
+                </div>
               </div>
+              <p class="field-hint settings-danger-hint">Clear DB permanently removes indexed photos, faces, clusters, and detections. Use only for a full reset.</p>
               <div id="stats-rows"></div>
             </section>
           </div>
@@ -280,6 +396,6 @@
   </div>
   <div id="toast-root" class="toast-root" aria-live="polite" aria-atomic="true"></div>
 
-  <script src="/app.js"></script>
+  <script src="/app.js?v=20260325b"></script>
 </body>
 </html>

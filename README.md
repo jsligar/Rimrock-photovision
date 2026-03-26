@@ -40,10 +40,16 @@ sudo mkdir -p /local/rimrock/photos
 sudo mkdir -p /mnt/mycloud/photos
 ```
 
-3. Build and start container service:
+3. Build and start container service (first time or after dependency changes):
 
 ```bash
 docker compose -f docker-compose.jetson.yml up -d --build
+```
+
+For day-to-day restarts without rebuild:
+
+```bash
+docker compose -f docker-compose.jetson.yml up -d --no-build
 ```
 
 `Dockerfile.jetson` uses NVIDIA's Jetson PyTorch `-igpu` container line and installs `requirements.jetson.txt` on top.
@@ -59,6 +65,7 @@ Shortcut helpers:
 ```bash
 bash scripts/jetson_up.sh
 bash scripts/jetson_down.sh
+bash scripts/jetson_status.sh
 ```
 
 ## Running The Pipeline
@@ -86,13 +93,13 @@ bash scripts/jetson_exec.sh "python -m api.main"
 
 ## Web UI
 
-Start API in container:
+API starts automatically as the container service command.
+Open `http://rimrock:8420` (or Jetson IP and configured port).
+If needed, verify service health:
 
 ```bash
-bash scripts/jetson_exec.sh "python -m api.main"
+bash scripts/jetson_status.sh
 ```
-
-Open `http://rimrock:8420` (or Jetson IP and configured port).
 
 ## Native Escape Hatch (No Container)
 

@@ -10,10 +10,9 @@ router = APIRouter()
 @router.get("/status")
 def get_all_status():
     conn = db.get_db()
-    rows = conn.execute(
-        "SELECT * FROM pipeline_state ORDER BY ROWID"
-    ).fetchall()
-    conn.close()
+    db.reconcile_background_jobs(conn)
+    rows = conn.execute("SELECT * FROM pipeline_state ORDER BY ROWID").fetchall()
+    bg_rows = conn.execute("SELECT * FROM background_jobs ORDER BY job_name").fetchall()
 
     phases = []
     for r in rows:
@@ -27,8 +26,21 @@ def get_all_status():
             "error_message": r["error_message"],
         })
 
+    background_jobs = []
+    for r in bg_rows:
+        background_jobs.append({
+            "job_name": r["job_name"],
+            "status": r["status"],
+            "progress_current": r["progress_current"],
+            "progress_total": r["progress_total"],
+            "started_at": r["started_at"],
+            "updated_at": r["updated_at"],
+            "completed_at": r["completed_at"],
+            "error_message": r["error_message"],
+            "detail": r["detail"],
+        })
+
     # Extra summary counts
-    conn = db.get_db()
     counts = {
         "total_photos": _count(conn, "SELECT COUNT(*) FROM photos"),
         "total_faces": _count(conn, "SELECT COUNT(*) FROM faces"),
@@ -40,7 +52,7 @@ def get_all_status():
     }
     conn.close()
 
-    return {"phases": phases, "counts": counts}
+    return {"phases": phases, "background_jobs": background_jobs, "counts": counts}
 
 
 def _count(conn, sql: str) -> int:

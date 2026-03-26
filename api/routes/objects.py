@@ -15,6 +15,26 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _sync_photo_tag_from_detection(conn, photo_id: int, tag: str, source: str) -> None:
+    """Mirror detection approval state into photo_tags for this source."""
+    approved_count = conn.execute(
+        """SELECT COUNT(*) FROM detections
+           WHERE photo_id=? AND tag=? AND model=? AND approved=1""",
+        (photo_id, tag, source),
+    ).fetchone()[0]
+
+    if approved_count > 0:
+        conn.execute(
+            "INSERT OR IGNORE INTO photo_tags (photo_id, tag, source) VALUES (?, ?, ?)",
+            (photo_id, tag, source),
+        )
+    else:
+        conn.execute(
+            "DELETE FROM photo_tags WHERE photo_id=? AND tag=? AND source=?",
+            (photo_id, tag, source),
+        )
+
+
 @router.get("/objects/tags")
 def list_tags():
     conn = db.get_db()
@@ -77,11 +97,15 @@ def get_photos_by_tag(tag: str, page: int = 1, per_page: int = 50):
 @router.post("/objects/detections/{detection_id}/reject")
 def reject_detection(detection_id: int):
     conn = db.get_db()
-    row = conn.execute("SELECT detection_id FROM detections WHERE detection_id=?", (detection_id,)).fetchone()
+    row = conn.execute(
+        "SELECT detection_id, photo_id, tag, model FROM detections WHERE detection_id=?",
+        (detection_id,),
+    ).fetchone()
     if not row:
         conn.close()
         raise HTTPException(status_code=404, detail="Detection not found")
     conn.execute("UPDATE detections SET approved=0 WHERE detection_id=?", (detection_id,))
+    _sync_photo_tag_from_detection(conn, int(row["photo_id"]), row["tag"], row["model"])
     conn.commit()
     conn.close()
     return {"ok": True}
@@ -90,11 +114,15 @@ def reject_detection(detection_id: int):
 @router.post("/objects/detections/{detection_id}/approve")
 def approve_detection(detection_id: int):
     conn = db.get_db()
-    row = conn.execute("SELECT detection_id FROM detections WHERE detection_id=?", (detection_id,)).fetchone()
+    row = conn.execute(
+        "SELECT detection_id, photo_id, tag, model FROM detections WHERE detection_id=?",
+        (detection_id,),
+    ).fetchone()
     if not row:
         conn.close()
         raise HTTPException(status_code=404, detail="Detection not found")
     conn.execute("UPDATE detections SET approved=1 WHERE detection_id=?", (detection_id,))
+    _sync_photo_tag_from_detection(conn, int(row["photo_id"]), row["tag"], row["model"])
     conn.commit()
     conn.close()
     return {"ok": True}

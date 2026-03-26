@@ -82,3 +82,12 @@ ssh jsligar@172.16.0.156 "sudo nvpmodel -m 2 && sudo jetson_clocks"
 - CSS: vanilla, CSS custom properties for theming
 - Keep changes minimal — don't refactor code you're not working on
 - Don't add docstrings or comments unless the logic is non-obvious
+
+## Agent File Access Rule
+
+- Persistent rule: Codex/Claude agents are explicitly allowed to read and edit Claude-managed files for this project.
+- In-scope Claude paths:
+  - Project-local: `.claude/**`
+  - User-global: `C:\Users\justi\.claude\**`
+- This includes commands, agents, plans, and related Claude settings/docs when required for task execution.
+- Prefer additive, dated updates for plans and operations notes instead of destructive rewrites.
