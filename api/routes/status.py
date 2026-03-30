@@ -1,5 +1,6 @@
 """Status routes — pipeline phase status."""
 
+import json
 from datetime import datetime
 from pathlib import Path
 
@@ -83,12 +84,47 @@ def get_all_status():
         "total_detections": _count(conn, "SELECT COUNT(*) FROM detections"),
         "photos_organized": _count(conn, "SELECT COUNT(*) FROM photos WHERE copy_verified=1"),
     }
+    if getattr(config, "ENABLE_SEARCH_LAYER", False):
+        counts.update(
+            {
+                "document_photos": _count(conn, "SELECT COUNT(*) FROM photos WHERE is_document=1"),
+                "document_photos_ocr_complete": _count(
+                    conn,
+                    """
+                    SELECT COUNT(*)
+                      FROM photos
+                     WHERE is_document=1
+                       AND ocr_text IS NOT NULL
+                       AND TRIM(ocr_text) <> ''
+                    """,
+                ),
+                "pending_ocr_documents": _count(
+                    conn,
+                    """
+                    SELECT COUNT(*)
+                      FROM photos
+                     WHERE is_document=1
+                       AND (ocr_text IS NULL OR TRIM(ocr_text) = '')
+                    """,
+                ),
+            }
+        )
+    else:
+        counts.update(
+            {
+                "document_photos": 0,
+                "document_photos_ocr_complete": 0,
+                "pending_ocr_documents": 0,
+            }
+        )
+    workflow = _workflow_summary(conn)
     conn.close()
 
     return {
         "phases": phases,
         "background_jobs": background_jobs,
         "counts": counts,
+        "workflow": workflow,
         "nvidia": nvidia_burst.get_status_summary(),
         "sidebar": _sidebar_summary(),
     }
@@ -109,6 +145,30 @@ def _sidebar_summary() -> dict:
         "search_layer_enabled": bool(config.ENABLE_SEARCH_LAYER),
         "search_ocr_enabled": bool(config.SEARCH_OCR_ENABLED),
         "nvidia_feature_enabled": bool(config.NVIDIA_BURST_ENABLED),
+    }
+
+
+def _workflow_summary(conn) -> dict:
+    values = dict(
+        conn.execute(
+            """
+            SELECT key, value
+              FROM pipeline_meta
+             WHERE key IN ('active_workflow_name', 'active_workflow_steps', 'active_workflow_started_at')
+            """
+        ).fetchall()
+    )
+    name = (values.get("active_workflow_name") or "").strip()
+    raw_steps = values.get("active_workflow_steps") or "[]"
+    try:
+        steps = json.loads(raw_steps)
+    except json.JSONDecodeError:
+        steps = []
+    return {
+        "active": bool(name),
+        "name": name or None,
+        "steps": steps if isinstance(steps, list) else [],
+        "started_at": (values.get("active_workflow_started_at") or "").strip() or None,
     }
 
 

@@ -24,7 +24,7 @@ def test_all_phases_seeded(tmp_db):
     c = db.get_db()
     phases = {r[0] for r in c.execute("SELECT phase FROM pipeline_state").fetchall()}
     c.close()
-    expected = {"preflight", "pull", "process", "cluster", "organize", "tag", "push", "verify"}
+    expected = {"preflight", "pull", "process", "cluster", "organize", "tag", "push", "verify", "ocr"}
     assert phases == expected
 
 
@@ -92,7 +92,7 @@ def test_init_db_idempotent(tmp_db):
     c = db.get_db()
     count = c.execute("SELECT COUNT(*) FROM pipeline_state").fetchone()[0]
     c.close()
-    assert count == 8
+    assert count == 9
 
 
 def test_reset_phase_state_clears_completion_metadata(tmp_db):

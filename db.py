@@ -160,7 +160,7 @@ def init_db() -> None:
         """
     )
 
-    phases = ["preflight", "pull", "process", "cluster", "organize", "tag", "push", "verify"]
+    phases = ["preflight", "pull", "process", "cluster", "organize", "tag", "push", "verify", "ocr"]
     for phase in phases:
         cur.execute(
             "INSERT OR IGNORE INTO pipeline_state (phase, status) VALUES (?, 'pending')",

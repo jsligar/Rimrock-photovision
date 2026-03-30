@@ -21,7 +21,7 @@ def test_status_returns_all_phases(client):
     assert "background_jobs" in data
     assert "counts" in data
     phases = [p["phase"] for p in data["phases"]]
-    assert phases == ["preflight", "pull", "process", "cluster", "organize", "tag", "push", "verify"]
+    assert phases == ["preflight", "pull", "process", "cluster", "organize", "tag", "push", "verify", "ocr"]
     assert data["background_jobs"] == []
 
 
@@ -43,6 +43,9 @@ def test_status_counts_zero_initially(client):
     assert counts["approved_clusters"] == 0
     assert counts["total_detections"] == 0
     assert counts["photos_organized"] == 0
+    assert counts["document_photos"] == 0
+    assert counts["document_photos_ocr_complete"] == 0
+    assert counts["pending_ocr_documents"] == 0
 
 
 def test_status_includes_running_background_jobs(client):
@@ -149,3 +152,20 @@ def test_status_marks_downstream_phases_stale_when_upstream_reruns(client):
     assert phase_map["push"]["is_stale"] is True
     assert phase_map["verify"]["status"] == "pending"
     assert phase_map["verify"]["is_stale"] is True
+
+
+def test_status_includes_active_workflow_summary(client):
+    import db
+
+    db.pipeline_meta_set("active_workflow_name", "intake")
+    db.pipeline_meta_set("active_workflow_steps", '["preflight","pull","process","cluster"]')
+    db.pipeline_meta_set("active_workflow_started_at", "2026-03-30T12:00:00+00:00")
+
+    resp = client.get("/api/status")
+    assert resp.status_code == 200
+    workflow = resp.json()["workflow"]
+
+    assert workflow["active"] is True
+    assert workflow["name"] == "intake"
+    assert workflow["steps"] == ["preflight", "pull", "process", "cluster"]
+    assert workflow["started_at"] == "2026-03-30T12:00:00+00:00"

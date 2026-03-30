@@ -56,6 +56,31 @@ def get_settings():
         pass
     total_photos = conn.execute("SELECT COUNT(*) FROM photos").fetchone()[0]
     total_faces = conn.execute("SELECT COUNT(*) FROM faces").fetchone()[0]
+    if getattr(config, "ENABLE_SEARCH_LAYER", False):
+        document_photos = conn.execute(
+            "SELECT COUNT(*) FROM photos WHERE is_document=1"
+        ).fetchone()[0]
+        document_photos_ocr_complete = conn.execute(
+            """
+            SELECT COUNT(*)
+              FROM photos
+             WHERE is_document=1
+               AND ocr_text IS NOT NULL
+               AND TRIM(ocr_text) <> ''
+            """
+        ).fetchone()[0]
+        pending_ocr_documents = conn.execute(
+            """
+            SELECT COUNT(*)
+              FROM photos
+             WHERE is_document=1
+               AND (ocr_text IS NULL OR TRIM(ocr_text) = '')
+            """
+        ).fetchone()[0]
+    else:
+        document_photos = 0
+        document_photos_ocr_complete = 0
+        pending_ocr_documents = 0
     conn.close()
 
     return {
@@ -77,6 +102,9 @@ def get_settings():
         "db_size_mb": round(db_size / 1024**2, 2),
         "total_photos": total_photos,
         "total_faces": total_faces,
+        "document_photos": document_photos,
+        "document_photos_ocr_complete": document_photos_ocr_complete,
+        "pending_ocr_documents": pending_ocr_documents,
         "search_layer_enabled": config.ENABLE_SEARCH_LAYER,
         "burst": nvidia_burst.get_usage_summary(),
     }
