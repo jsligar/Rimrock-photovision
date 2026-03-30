@@ -520,11 +520,9 @@ function renderSelectionCaption() {
       ? `${count} face(s) selected. Move them into the correct person.`
       : 'Select face(s) from a matched person bucket and move them into the right person.';
   } else if (isPersonMode()) {
-    text = count === 1
-      ? 'One face selected. Remove it from the person file to create a new unlabeled cluster.'
-      : count > 1
-        ? 'Select exactly one face to remove from the person file.'
-        : 'Select one face to remove from the person file.';
+    text = count > 0
+      ? `${count} face(s) selected. Remove them from the person file and return them to unlabeled cleanup.`
+      : 'Select one or more wrong faces to remove from the person file.';
   } else {
     text = count > 0
       ? `${count} face(s) selected. You can move them into a different person label.`
@@ -566,7 +564,7 @@ function renderReviewControls(cluster) {
   el('btn-review-move-selected').disabled = busy || selectedCount === 0 || !el('review-destination-input').value.trim();
 
   el('btn-review-remove-selected').style.display = isPersonMode() ? '' : 'none';
-  el('btn-review-remove-selected').disabled = busy || selectedCount !== 1;
+  el('btn-review-remove-selected').disabled = busy || selectedCount === 0;
 
   renderSelectionCaption();
 }
@@ -887,9 +885,6 @@ function toggleFaceSelection(faceId) {
   if (state.selectedFaceIds.has(faceId)) {
     state.selectedFaceIds.delete(faceId);
   } else {
-    if (isPersonMode()) {
-      state.selectedFaceIds.clear();
-    }
     state.selectedFaceIds.add(faceId);
   }
   renderSelectedCluster();
@@ -962,19 +957,36 @@ async function removeSelectedPersonFace() {
   if (!isPersonMode()) {
     return;
   }
-  const selected = Array.from(state.selectedFaceIds);
-  if (selected.length !== 1) {
-    showToast('Select exactly one face to remove.', 'err');
+  const selectedFaces = currentReviewSelection();
+  if (!selectedFaces.length) {
+    showToast('Select one or more faces to remove.', 'err');
     return;
   }
 
   try {
-    await apiPost(`/clusters/${state.selectedClusterId}/person-review/remove-face`, {
-      face_ids: selected,
+    const grouped = new Map();
+    selectedFaces.forEach(face => {
+      const clusterId = Number(face.cluster_id);
+      if (!Number.isFinite(clusterId)) {
+        return;
+      }
+      if (!grouped.has(clusterId)) {
+        grouped.set(clusterId, []);
+      }
+      grouped.get(clusterId).push(face.face_id);
     });
-    showToast('Removed face from the person file.', 'ok');
+
+    let movedFaces = 0;
+    for (const [clusterId, faceIds] of grouped.entries()) {
+      const result = await apiPost(`/clusters/${clusterId}/untag-faces`, {
+        face_ids: faceIds,
+      });
+      movedFaces += Number(result.moved_faces || 0);
+    }
+
+    showToast(`Removed ${movedFaces} face(s) from the person file.`, 'ok');
     clearFaceSelection();
-    await loadPersonReview(state.selectedClusterId);
+    await loadPeopleMode();
     await refreshStatus();
   } catch (error) {
     showToast(error.message, 'err');
