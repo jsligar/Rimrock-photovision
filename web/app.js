@@ -34,6 +34,7 @@ const state = {
   prototypeScopeClusterId: null,
   personReviewData: null,
   selectedFaceIds: new Set(),
+  lastSelectedFaceIndex: null,
   clusterSuggestions: {},
   clusterLabelDrafts: {},
   reviewSidebarCollapsed: {
@@ -48,7 +49,16 @@ const state = {
   photoPage: 1,
   photoPerPage: 48,
   photoTotal: 0,
+  searchLayerEnabled: false,
+  semanticSearchActive: false,
+  lastSearchQuery: '',
+  savedSearches: [],
+  selectedTag: null,
+  objectPage: 1,
+  objectTagsLoaded: false,
+  objectTagGroups: {},
   photoModalId: null,
+  modalActionBusy: false,
   autoRefreshTimer: null,
   logExpanded: false,
 };
@@ -94,6 +104,10 @@ function apiPost(path, body) {
   return api(path, opts);
 }
 
+function apiDelete(path) {
+  return api(path, { method: 'DELETE' });
+}
+
 function fmtNumber(value) {
   if (value == null || Number.isNaN(Number(value))) {
     return '-';
@@ -106,6 +120,28 @@ function fmtDate(value) {
     return 'Undated';
   }
   return String(value).slice(0, 10);
+}
+
+function photoThumbSrc(photo) {
+  const rawPath = photo?.dest_path || photo?.source_path || '';
+  const prefix = photo?.dest_path ? 'organized' : 'originals';
+  const parts = String(rawPath).split(/\\|\//).filter(Boolean);
+  if (!parts.length) {
+    return '';
+  }
+  return `/${prefix}/${parts.map(encodeURIComponent).join('/')}`;
+}
+
+function isTextEntryTarget(target) {
+  return Boolean(
+    target &&
+    (
+      target.tagName === 'INPUT' ||
+      target.tagName === 'TEXTAREA' ||
+      target.tagName === 'SELECT' ||
+      target.isContentEditable
+    )
+  );
 }
 
 function showToast(message, tone = 'ok') {
@@ -173,11 +209,13 @@ function openTab(tabId) {
 
   if (tabId === 'review') {
     loadReview();
+  } else if (tabId === 'objects') {
+    loadObjectsView();
   } else if (tabId === 'library') {
     if (!state.photoFiltersLoaded) {
-      loadPhotoFilters().finally(() => loadPhotos(1));
+      loadPhotoFilters().finally(() => loadLibraryView());
     } else {
-      loadPhotos(state.photoPage);
+      loadLibraryView();
     }
   } else if (tabId === 'settings') {
     if (!state.settingsLoaded) {
@@ -357,6 +395,7 @@ function derivePrototypeScopeClusterId() {
 
 function clearFaceSelection() {
   state.selectedFaceIds.clear();
+  state.lastSelectedFaceIndex = null;
 }
 
 function selectedPersonFile() {
@@ -456,6 +495,132 @@ function noiseClusters() {
 
 function firstQueueClusterId() {
   return queueClusters()[0]?.cluster_id || noiseClusters()[0]?.cluster_id || null;
+}
+
+function selectedDestinationClusterId() {
+  const raw = Number.parseInt(el('review-destination-cluster')?.value || '', 10);
+  return Number.isFinite(raw) ? raw : null;
+}
+
+function selectedMergeTargetId() {
+  const raw = Number.parseInt(el('review-merge-target')?.value || '', 10);
+  return Number.isFinite(raw) ? raw : null;
+}
+
+function clusterOptionLabel(cluster) {
+  if (!cluster) {
+    return '';
+  }
+  const name = cluster.person_label ? `${cluster.person_label} | cluster ${cluster.cluster_id}` : `Cluster ${cluster.cluster_id}`;
+  return `${name} | ${fmtNumber(cluster.face_count || 0)} face(s)`;
+}
+
+function repopulateClusterSelect(selectId, clusters, placeholder, keepValue = '') {
+  const select = el(selectId);
+  if (!select) {
+    return;
+  }
+  const previous = keepValue || select.value || '';
+  select.innerHTML = `<option value="">${escHtml(placeholder)}</option>`;
+  (clusters || []).forEach(cluster => {
+    const option = document.createElement('option');
+    option.value = String(cluster.cluster_id);
+    option.textContent = clusterOptionLabel(cluster);
+    select.appendChild(option);
+  });
+  if (previous && Array.from(select.options).some(option => option.value === previous)) {
+    select.value = previous;
+  }
+}
+
+function refreshReviewTargets(cluster) {
+  const clusterOptions = isPrototypeMode() || isPersonMode() || !cluster
+    ? []
+    : state.clusters.filter(item => item.cluster_id !== cluster.cluster_id);
+  const mergeOptions = !cluster || isPrototypeMode() || isPersonMode()
+    ? []
+    : state.clusters.filter(item => item.cluster_id !== cluster.cluster_id);
+  repopulateClusterSelect('review-destination-cluster', clusterOptions, 'Or move into an existing cluster...');
+  repopulateClusterSelect('review-merge-target', mergeOptions, 'Choose a merge target...');
+}
+
+function currentReviewQueue() {
+  if (isPrototypeMode()) {
+    return state.prototypeGroups.map(group => ({
+      key: normalizePrototypeLabel(group.person_label),
+      type: 'prototype',
+      label: group.person_label,
+    }));
+  }
+  if (isPersonMode()) {
+    return state.personFiles.map(person => ({
+      key: normalizePrototypeLabel(person.person_label),
+      type: 'person',
+      label: person.person_label,
+      clusterId: person.representative_cluster_id,
+    }));
+  }
+  return [...queueClusters(), ...noiseClusters()].map(cluster => ({
+    key: String(cluster.cluster_id),
+    type: 'cluster',
+    clusterId: cluster.cluster_id,
+  }));
+}
+
+async function navigateReviewSelection(delta) {
+  const items = currentReviewQueue();
+  if (!items.length) {
+    return;
+  }
+
+  let currentIndex = 0;
+  if (isPrototypeMode()) {
+    currentIndex = Math.max(
+      0,
+      items.findIndex(item => item.key === normalizePrototypeLabel(state.selectedPrototypeLabel))
+    );
+  } else if (isPersonMode()) {
+    currentIndex = Math.max(
+      0,
+      items.findIndex(item => item.key === normalizePrototypeLabel(state.selectedPersonLabel))
+    );
+  } else {
+    currentIndex = Math.max(
+      0,
+      items.findIndex(item => item.clusterId === state.selectedClusterId)
+    );
+  }
+
+  const nextIndex = Math.max(0, Math.min(items.length - 1, currentIndex + delta));
+  const next = items[nextIndex];
+  if (!next || nextIndex === currentIndex) {
+    return;
+  }
+
+  clearFaceSelection();
+  if (next.type === 'prototype') {
+    state.selectedPrototypeLabel = next.label;
+    renderClusters();
+    await loadPrototypeFaces(next.label);
+    return;
+  }
+  if (next.type === 'person') {
+    state.reviewMode = 'people';
+    state.selectedPersonLabel = next.label;
+    state.selectedPersonClusterId = next.clusterId;
+    state.selectedClusterId = next.clusterId;
+    renderClusters();
+    await loadPersonReview(next.clusterId);
+    return;
+  }
+
+  state.reviewMode = 'cluster';
+  state.selectedPersonLabel = null;
+  state.selectedPersonClusterId = null;
+  state.personReviewData = null;
+  state.selectedClusterId = next.clusterId;
+  renderClusters();
+  await loadClusterCrops(next.clusterId);
 }
 
 function isReviewSectionCollapsed(sectionKey) {
@@ -602,15 +767,23 @@ function renderSelectionCaption() {
   } else {
     text = count > 0
       ? `${count} face(s) selected. You can move them into a different person label.`
-      : 'Cluster actions work on the whole cluster. Select specific faces to move only those faces.';
+      : 'Cluster actions work on the whole cluster. Select faces to move or remove only those crops.';
   }
-  el('review-selection-caption').textContent = text;
+  el('review-selection-caption').textContent = `${text} Shift-click selects a range.`;
 }
 
 function renderReviewControls(cluster) {
   const busy = isBusy();
   const selectedCount = state.selectedFaceIds.size;
   const hasLabeledCluster = !!(cluster && cluster.person_label);
+  const clusterField = el('review-destination-cluster');
+  const clusterFieldWrap = clusterField?.closest('.field');
+  const mergeField = el('review-merge-target');
+  const mergeFieldWrap = mergeField?.closest('.field');
+
+  refreshReviewTargets(cluster);
+  const destinationClusterId = selectedDestinationClusterId();
+  const destinationLabel = el('review-destination-input').value.trim();
 
   el('cluster-label-input').disabled = busy || isPrototypeMode() || isPersonMode() || !cluster;
   el('cluster-label-input').placeholder = isPrototypeMode()
@@ -628,18 +801,34 @@ function renderReviewControls(cluster) {
   el('btn-review-whole-file').disabled = busy || !cluster || (!hasLabeledCluster && !isPersonMode());
   el('btn-review-whole-file').textContent = isPersonMode() ? 'Back To Queues' : 'Whole File';
 
-  const destinationField = el('review-destination-input').closest('.field');
-  if (destinationField) {
-    destinationField.style.display = isPersonMode() ? 'none' : '';
+  if (clusterFieldWrap) {
+    clusterFieldWrap.style.display = isPersonMode() ? 'none' : '';
   }
+  clusterField.hidden = isPrototypeMode() || isPersonMode();
+  clusterField.disabled = busy || !cluster || isPrototypeMode() || isPersonMode();
   el('selection-destination-label').textContent = isPrototypeMode()
     ? 'Move Selected To Person'
     : 'Move Selected To Person';
   el('review-destination-input').disabled = busy;
+  el('review-destination-input').placeholder = isPrototypeMode()
+    ? 'Enter a person name'
+    : destinationClusterId
+      ? 'Or enter a new person name'
+      : 'Enter a person name';
   el('btn-review-move-selected').style.display = isPersonMode() ? 'none' : '';
-  el('btn-review-move-selected').disabled = busy || selectedCount === 0 || !el('review-destination-input').value.trim();
+  el('btn-review-move-selected').disabled = busy || selectedCount === 0 || (!destinationClusterId && !destinationLabel);
 
-  el('btn-review-remove-selected').style.display = isPersonMode() ? '' : 'none';
+  if (mergeFieldWrap) {
+    mergeFieldWrap.style.display = !cluster || isPrototypeMode() || isPersonMode() ? 'none' : '';
+  }
+  mergeField.disabled = busy || !cluster || isPrototypeMode() || isPersonMode();
+  el('btn-review-merge-cluster').style.display = !cluster || isPrototypeMode() || isPersonMode() ? 'none' : '';
+  el('btn-review-merge-cluster').disabled = busy || !selectedMergeTargetId();
+
+  el('btn-review-undo-move').disabled = busy;
+  el('btn-review-select-all').disabled = busy || !(state.reviewFaces || []).length;
+  el('btn-review-clear-selection').disabled = busy || selectedCount === 0;
+  el('btn-review-remove-selected').style.display = isPrototypeMode() ? 'none' : '';
   el('btn-review-remove-selected').disabled = busy || selectedCount === 0;
 
   renderSelectionCaption();
@@ -718,8 +907,8 @@ function renderReviewFaces() {
     return;
   }
 
-  grid.innerHTML = state.reviewFaces.map(face => `
-    <button class="crop-card selectable ${state.selectedFaceIds.has(face.face_id) ? 'selected' : ''}" data-face-id="${face.face_id}" type="button">
+  grid.innerHTML = state.reviewFaces.map((face, index) => `
+    <button class="crop-card selectable ${state.selectedFaceIds.has(face.face_id) ? 'selected' : ''}" data-face-id="${face.face_id}" data-face-index="${index}" type="button">
       <img src="${escHtml(face.crop_url || '')}" alt="${escHtml(face.filename || 'face crop')}" />
       <div class="crop-indicator">&#10003;</div>
       <footer>
@@ -1057,31 +1246,78 @@ async function loadPersonReview(clusterId) {
   }
 }
 
-function toggleFaceSelection(faceId) {
-  if (state.selectedFaceIds.has(faceId)) {
+function toggleFaceSelection(faceId, faceIndex = null, shiftKey = false) {
+  if (
+    shiftKey &&
+    faceIndex != null &&
+    state.lastSelectedFaceIndex != null &&
+    Array.isArray(state.reviewFaces) &&
+    state.reviewFaces.length
+  ) {
+    const lower = Math.min(state.lastSelectedFaceIndex, faceIndex);
+    const upper = Math.max(state.lastSelectedFaceIndex, faceIndex);
+    for (let index = lower; index <= upper; index += 1) {
+      const face = state.reviewFaces[index];
+      if (face?.face_id) {
+        state.selectedFaceIds.add(face.face_id);
+      }
+    }
+  } else if (state.selectedFaceIds.has(faceId)) {
     state.selectedFaceIds.delete(faceId);
   } else {
     state.selectedFaceIds.add(faceId);
   }
+  state.lastSelectedFaceIndex = faceIndex;
   renderSelectedCluster();
 }
 
-async function moveSelectedFaces() {
-  const targetPersonLabel = el('review-destination-input').value.trim();
-  if (!targetPersonLabel) {
-    showToast('Enter a destination person label.', 'err');
-    return;
+function selectAllReviewFaces() {
+  (state.reviewFaces || []).forEach(face => {
+    if (face?.face_id) {
+      state.selectedFaceIds.add(face.face_id);
+    }
+  });
+  if ((state.reviewFaces || []).length) {
+    state.lastSelectedFaceIndex = state.reviewFaces.length - 1;
   }
+  renderSelectedCluster();
+}
 
+function clearFaceSelectionAndRender() {
+  clearFaceSelection();
+  renderSelectedCluster();
+}
+
+function resetReviewDestinationInputs() {
+  el('review-destination-input').value = '';
+  el('review-destination-cluster').value = '';
+}
+
+async function moveSelectedFaces() {
   const selectedFaces = currentReviewSelection();
   if (!selectedFaces.length) {
     showToast('Select one or more faces first.', 'err');
     return;
   }
 
+  const targetClusterId = selectedDestinationClusterId();
+  const targetPersonLabel = targetClusterId ? '' : el('review-destination-input').value.trim();
+  if (!targetClusterId && !targetPersonLabel) {
+    showToast('Choose a destination cluster or enter a person label.', 'err');
+    return;
+  }
+
   try {
+    const destinationLabel = targetClusterId ? `cluster ${targetClusterId}` : targetPersonLabel;
+    const confirmed = window.confirm(`Move ${selectedFaces.length} selected face(s) to ${destinationLabel}?`);
+    if (!confirmed) {
+      return;
+    }
+
     if (isPrototypeMode()) {
       const grouped = new Map();
+      let movedFaces = 0;
+      let skippedFaces = 0;
       selectedFaces.forEach(face => {
         const clusterId = Number(face.cluster_id);
         if (!Number.isFinite(clusterId)) {
@@ -1094,15 +1330,27 @@ async function moveSelectedFaces() {
       });
 
       for (const [clusterId, faceIds] of grouped.entries()) {
-        await apiPost('/clusters/reassign-faces', {
+        if (targetClusterId && targetClusterId === clusterId) {
+          skippedFaces += faceIds.length;
+          continue;
+        }
+        const result = await apiPost('/clusters/reassign-faces', {
           source_cluster_id: clusterId,
           face_ids: faceIds,
-          target_person_label: targetPersonLabel,
+          target_cluster_id: targetClusterId || undefined,
+          target_person_label: targetClusterId ? null : targetPersonLabel,
         });
+        movedFaces += Number(result.moved_faces || faceIds.length);
       }
-      showToast(`Moved ${selectedFaces.length} face(s) to ${targetPersonLabel}.`, 'ok');
+
       clearFaceSelection();
-      el('review-destination-input').value = '';
+      resetReviewDestinationInputs();
+      showToast(
+        skippedFaces
+          ? `Moved ${movedFaces} face(s). Skipped ${skippedFaces} already in the target cluster.`
+          : `Moved ${movedFaces} face(s) to ${destinationLabel}.`,
+        'ok'
+      );
       await loadPrototypeGroups();
       await refreshStatus();
       return;
@@ -1114,14 +1362,23 @@ async function moveSelectedFaces() {
       return;
     }
 
-    await apiPost('/clusters/reassign-faces', {
+    if (targetClusterId && targetClusterId === cluster.cluster_id) {
+      showToast('Choose a different destination cluster.', 'err');
+      return;
+    }
+
+    const result = await apiPost('/clusters/reassign-faces', {
       source_cluster_id: cluster.cluster_id,
       face_ids: selectedFaces.map(face => face.face_id),
-      target_person_label: targetPersonLabel,
+      target_cluster_id: targetClusterId || undefined,
+      target_person_label: targetClusterId ? null : targetPersonLabel,
     });
-    showToast(`Moved ${selectedFaces.length} face(s) to ${targetPersonLabel}.`, 'ok');
+    showToast(`Moved ${selectedFaces.length} face(s) to ${destinationLabel}.`, 'ok');
     clearFaceSelection();
-    el('review-destination-input').value = '';
+    resetReviewDestinationInputs();
+    if (Number.isFinite(result.target_cluster_id)) {
+      state.selectedClusterId = result.target_cluster_id;
+    }
     await loadClusters();
     await refreshStatus();
   } catch (error) {
@@ -1129,10 +1386,7 @@ async function moveSelectedFaces() {
   }
 }
 
-async function removeSelectedPersonFace() {
-  if (!isPersonMode()) {
-    return;
-  }
+async function removeSelectedFaces() {
   const selectedFaces = currentReviewSelection();
   if (!selectedFaces.length) {
     showToast('Select one or more faces to remove.', 'err');
@@ -1140,6 +1394,15 @@ async function removeSelectedPersonFace() {
   }
 
   try {
+    const confirmed = window.confirm(
+      isPersonMode()
+        ? `Remove ${selectedFaces.length} face(s) from this person file and send them back to unlabeled review?`
+        : `Untag ${selectedFaces.length} selected face(s) into a new unlabeled cluster?`
+    );
+    if (!confirmed) {
+      return;
+    }
+
     const grouped = new Map();
     selectedFaces.forEach(face => {
       const clusterId = Number(face.cluster_id);
@@ -1153,16 +1416,93 @@ async function removeSelectedPersonFace() {
     });
 
     let movedFaces = 0;
+    let targetClusterId = null;
     for (const [clusterId, faceIds] of grouped.entries()) {
       const result = await apiPost(`/clusters/${clusterId}/untag-faces`, {
         face_ids: faceIds,
       });
       movedFaces += Number(result.moved_faces || 0);
+      if (targetClusterId == null && Number.isFinite(result.target_cluster_id)) {
+        targetClusterId = result.target_cluster_id;
+      }
     }
 
-    showToast(`Removed ${movedFaces} face(s) from the person file.`, 'ok');
+    showToast(
+      isPersonMode()
+        ? `Removed ${movedFaces} face(s) from the person file.`
+        : `Untagged ${movedFaces} selected face(s).`,
+      'ok'
+    );
     clearFaceSelection();
-    await loadPeopleMode();
+    resetReviewDestinationInputs();
+    if (!isPersonMode() && Number.isFinite(targetClusterId)) {
+      state.selectedClusterId = targetClusterId;
+    }
+    if (isPersonMode()) {
+      await loadPeopleMode();
+    } else {
+      await loadClusters();
+    }
+    await refreshStatus();
+  } catch (error) {
+    showToast(error.message, 'err');
+  }
+}
+
+async function undoLastMove() {
+  const confirmed = window.confirm('Undo the most recent face move?');
+  if (!confirmed) {
+    return;
+  }
+
+  try {
+    const result = await apiPost('/clusters/reassign-faces/undo-last');
+    clearFaceSelection();
+    state.reviewMode = 'cluster';
+    state.selectedPersonLabel = null;
+    state.selectedPersonClusterId = null;
+    state.selectedPrototypeLabel = null;
+    state.prototypeScopeClusterId = null;
+    state.personReviewData = null;
+    state.selectedClusterId = Number(result.source_cluster_id);
+    showToast(`Undid move ${result.move_id}.`, 'ok');
+    await loadClusters();
+    await refreshStatus();
+  } catch (error) {
+    showToast(error.message, 'err');
+  }
+}
+
+async function mergeCluster() {
+  const cluster = selectedCluster();
+  const targetClusterId = selectedMergeTargetId();
+  if (!cluster) {
+    showToast('Pick a cluster first.', 'err');
+    return;
+  }
+  if (!targetClusterId) {
+    showToast('Choose a merge target.', 'err');
+    return;
+  }
+  if (targetClusterId === cluster.cluster_id) {
+    showToast('Choose a different merge target.', 'err');
+    return;
+  }
+
+  const confirmed = window.confirm(`Merge cluster ${cluster.cluster_id} into cluster ${targetClusterId}?`);
+  if (!confirmed) {
+    return;
+  }
+
+  try {
+    await apiPost('/clusters/merge', {
+      source_cluster_id: cluster.cluster_id,
+      target_cluster_id: targetClusterId,
+    });
+    clearFaceSelection();
+    state.selectedClusterId = targetClusterId;
+    showToast('Clusters merged.', 'ok');
+    await loadClusters();
     await refreshStatus();
   } catch (error) {
     showToast(error.message, 'err');
@@ -1172,6 +1512,10 @@ async function removeSelectedPersonFace() {
 function renderPhotoFilters(filters) {
   const personSelect = el('filter-person');
   const tagSelect = el('filter-tag');
+  const previous = {
+    person: personSelect.value,
+    tag: tagSelect.value,
+  };
 
   personSelect.innerHTML = '<option value="">All</option>';
   (filters.people || []).forEach(item => {
@@ -1188,6 +1532,21 @@ function renderPhotoFilters(filters) {
     opt.textContent = `${item.tag} (${item.photo_count})`;
     tagSelect.appendChild(opt);
   });
+
+  if (previous.person && Array.from(personSelect.options).some(opt => opt.value === previous.person)) {
+    personSelect.value = previous.person;
+  }
+  if (previous.tag && Array.from(tagSelect.options).some(opt => opt.value === previous.tag)) {
+    tagSelect.value = previous.tag;
+  }
+  updateLibraryFieldLocks();
+}
+
+function updateLibraryFieldLocks() {
+  const undated = el('filter-undated').checked;
+  ['filter-person', 'filter-tag', 'filter-year', 'filter-month'].forEach(id => {
+    el(id).disabled = undated;
+  });
 }
 
 function buildPhotoParams(page) {
@@ -1198,7 +1557,8 @@ function buildPhotoParams(page) {
   const person = el('filter-person').value;
   const tag = el('filter-tag').value;
   const year = el('filter-year').value.trim();
-  const month = el('filter-month').value.trim();
+  const monthRaw = el('filter-month').value.trim();
+  const month = monthRaw ? monthRaw.padStart(2, '0') : '';
   const q = el('filter-query').value.trim();
   const undated = el('filter-undated').checked;
 
@@ -1212,53 +1572,475 @@ function buildPhotoParams(page) {
   return params.toString();
 }
 
-function renderPhotos() {
-  const container = el('photo-grid');
-  if (!state.photos.length) {
-    container.innerHTML = '<div class="empty-state">No photos matched the current filters.</div>';
-  } else {
-    container.innerHTML = state.photos.map(photo => {
-      const src = photo.dest_path
-        ? `/organized/${photo.dest_path.split(/\\|\//).map(encodeURIComponent).join('/')}`
-        : `/originals/${photo.source_path.split(/\\|\//).map(encodeURIComponent).join('/')}`;
-      return `
-        <button class="photo-card" data-photo-id="${photo.photo_id}" type="button">
-          <img src="${escHtml(src)}" alt="${escHtml(photo.filename)}" />
-          <footer>
-            <strong>${escHtml(photo.filename)}</strong>
-            <span class="phase-meta">${escHtml(fmtDate(photo.exif_date))}</span>
-          </footer>
-        </button>
-      `;
-    }).join('');
+function renderPhotoCards(containerId, photos, options = {}) {
+  const container = el(containerId);
+  if (!container) {
+    return;
+  }
+  if (!photos.length) {
+    container.innerHTML = `<div class="empty-state">${escHtml(options.emptyText || 'No photos found.')}</div>`;
+    return;
   }
 
-  el('library-result-count').textContent = `${fmtNumber(state.photoTotal)} photos`;
-  renderPagination();
+  container.innerHTML = photos.map(photo => {
+    const metaBits = [];
+    if (options.showScore && photo.score != null) {
+      metaBits.push(`score ${Number(photo.score).toFixed(2)}`);
+    }
+    metaBits.push(fmtDate(photo.exif_date));
+    return `
+      <button class="photo-card" data-photo-id="${photo.photo_id}" type="button">
+        <img src="${escHtml(photoThumbSrc(photo))}" alt="${escHtml(photo.filename)}" loading="lazy" />
+        <footer>
+          <strong>${escHtml(photo.filename || 'Photo')}</strong>
+          <span class="phase-meta">${escHtml(metaBits.join(' | '))}</span>
+        </footer>
+      </button>
+    `;
+  }).join('');
 }
 
-function renderPagination() {
-  const container = el('library-pagination');
-  const totalPages = Math.max(1, Math.ceil(state.photoTotal / state.photoPerPage));
+function renderPager(containerId, page, total, perPage, onPage) {
+  const container = el(containerId);
+  if (!container) {
+    return;
+  }
+  const totalPages = Math.max(1, Math.ceil(total / perPage));
   container.innerHTML = '';
+  if (totalPages <= 1) {
+    return;
+  }
 
   const prev = document.createElement('button');
   prev.className = 'btn btn-small';
   prev.textContent = 'Previous';
-  prev.disabled = state.photoPage <= 1;
-  prev.addEventListener('click', () => loadPhotos(state.photoPage - 1));
+  prev.disabled = page <= 1;
+  prev.addEventListener('click', () => onPage(page - 1));
   container.appendChild(prev);
 
   const info = document.createElement('span');
-  info.textContent = `Page ${state.photoPage} of ${totalPages}`;
+  info.textContent = `Page ${page} of ${totalPages}`;
   container.appendChild(info);
 
   const next = document.createElement('button');
   next.className = 'btn btn-small';
   next.textContent = 'Next';
-  next.disabled = state.photoPage >= totalPages;
-  next.addEventListener('click', () => loadPhotos(state.photoPage + 1));
+  next.disabled = page >= totalPages;
+  next.addEventListener('click', () => onPage(page + 1));
   container.appendChild(next);
+}
+
+function renderPhotos() {
+  renderPhotoCards('photo-grid', state.photos, {
+    emptyText: state.semanticSearchActive
+      ? 'No semantic search results matched this query.'
+      : 'No photos matched the current filters.',
+    showScore: state.semanticSearchActive,
+  });
+  el('library-result-count').textContent = state.semanticSearchActive
+    ? `${fmtNumber(state.photoTotal)} search results`
+    : `${fmtNumber(state.photoTotal)} photos`;
+  renderPagination();
+}
+
+function renderPagination() {
+  if (state.semanticSearchActive) {
+    el('library-pagination').innerHTML = '';
+    return;
+  }
+  renderPager('library-pagination', state.photoPage, state.photoTotal, state.photoPerPage, nextPage => loadPhotos(nextPage));
+}
+
+function clearSearchFacets() {
+  el('search-facets').hidden = true;
+  ['facet-people', 'facet-tags', 'facet-years'].forEach(id => {
+    el(id).innerHTML = '';
+  });
+}
+
+function syncSearchLayerVisibility() {
+  const enabled = Boolean(state.searchLayerEnabled);
+  el('semantic-search-bar').hidden = !enabled;
+  el('btn-search-clear').hidden = !enabled || !state.semanticSearchActive;
+  el('btn-search-save').hidden = !enabled || !state.semanticSearchActive || !state.lastSearchQuery;
+  el('search-saved').hidden = !enabled || !state.savedSearches.length;
+  if (!enabled) {
+    clearSearchFacets();
+    el('search-result-count').textContent = '';
+  }
+}
+
+function clearSemanticSearchState(options = {}) {
+  const preserveInput = options.preserveInput !== false;
+  state.semanticSearchActive = false;
+  if (!preserveInput) {
+    state.lastSearchQuery = '';
+    el('search-input').value = '';
+  }
+  el('search-result-count').textContent = '';
+  clearSearchFacets();
+  syncSearchLayerVisibility();
+}
+
+function applyQuickQuery(raw) {
+  const query = String(raw || '').trim();
+  el('filter-person').value = '';
+  el('filter-tag').value = '';
+  el('filter-year').value = '';
+  el('filter-month').value = '';
+  el('filter-query').value = '';
+  el('filter-undated').checked = false;
+
+  if (!query) {
+    updateLibraryFieldLocks();
+    return;
+  }
+
+  const freeText = [];
+  query.split(/\s+/).forEach(token => {
+    const [rawKey, ...rest] = token.split(':');
+    const value = rest.join(':').trim();
+    const key = rawKey.toLowerCase();
+    if (!rest.length) {
+      freeText.push(token);
+      return;
+    }
+    if (key === 'person' && value) el('filter-person').value = value;
+    else if (key === 'tag' && value) el('filter-tag').value = value;
+    else if (key === 'year' && value) el('filter-year').value = value;
+    else if (key === 'month' && value) el('filter-month').value = value.padStart(2, '0');
+    else if ((key === 'undated' || key === 'no-date') && (!value || value === 'true')) el('filter-undated').checked = true;
+    else if (key === 'q' && value) freeText.push(value);
+  });
+
+  if (freeText.length) {
+    el('filter-query').value = freeText.join(' ');
+  }
+  updateLibraryFieldLocks();
+}
+
+function renderSearchFacets(facets) {
+  const hasFacets = Boolean(
+    facets &&
+    (
+      (facets.people || []).length ||
+      (facets.tags || []).length ||
+      (facets.years || []).length
+    )
+  );
+  if (!hasFacets) {
+    clearSearchFacets();
+    return;
+  }
+
+  el('search-facets').hidden = false;
+  renderFacetGroup('facet-people', facets.people || [], item => {
+    clearSemanticSearchState();
+    el('filter-person').value = item.person;
+    loadPhotos(1);
+  }, item => item.person);
+  renderFacetGroup('facet-tags', facets.tags || [], item => {
+    clearSemanticSearchState();
+    el('filter-tag').value = item.tag;
+    loadPhotos(1);
+  }, item => item.tag);
+  renderFacetGroup('facet-years', facets.years || [], item => {
+    clearSemanticSearchState();
+    el('filter-year').value = item.year;
+    loadPhotos(1);
+  }, item => item.year);
+}
+
+function renderFacetGroup(containerId, items, onSelect, labelFn) {
+  const container = el(containerId);
+  container.innerHTML = '';
+  if (!items.length) {
+    container.innerHTML = '<div class="sidebar-caption">No matches</div>';
+    return;
+  }
+
+  items.forEach(item => {
+    const button = document.createElement('button');
+    button.className = 'facet-item';
+    button.type = 'button';
+    button.innerHTML = `<span>${escHtml(labelFn(item))}</span><span class="facet-count">${fmtNumber(item.count)}</span>`;
+    button.addEventListener('click', () => onSelect(item));
+    container.appendChild(button);
+  });
+}
+
+async function refreshSavedSearches() {
+  if (!state.searchLayerEnabled) {
+    state.savedSearches = [];
+    syncSearchLayerVisibility();
+    return;
+  }
+  try {
+    state.savedSearches = await api('/searches');
+  } catch (_) {
+    state.savedSearches = [];
+  }
+
+  const select = el('search-saved');
+  select.innerHTML = '<option value="">Saved searches...</option>';
+  state.savedSearches.forEach(search => {
+    const option = document.createElement('option');
+    option.value = String(search.search_id);
+    option.textContent = search.name;
+    select.appendChild(option);
+  });
+  syncSearchLayerVisibility();
+}
+
+async function saveCurrentSearch() {
+  if (!state.searchLayerEnabled || !state.lastSearchQuery) {
+    return;
+  }
+  const name = window.prompt('Name this search:', state.lastSearchQuery);
+  if (!name) {
+    return;
+  }
+  try {
+    await apiPost('/searches', { name, query: { q: state.lastSearchQuery } });
+    showToast('Search saved.', 'ok');
+    await refreshSavedSearches();
+  } catch (error) {
+    showToast(error.message, 'err');
+  }
+}
+
+async function runSemanticSearch(options = {}) {
+  if (!state.searchLayerEnabled) {
+    showToast('Semantic search is disabled in settings.', 'err');
+    return;
+  }
+  const query = String(options.reuseLast ? state.lastSearchQuery : el('search-input').value).trim();
+  if (!query) {
+    showToast('Enter a search query first.', 'err');
+    return;
+  }
+
+  state.lastSearchQuery = query;
+  state.semanticSearchActive = true;
+  state.photoPage = 1;
+  el('search-input').value = query;
+  syncSearchLayerVisibility();
+  el('photo-grid').innerHTML = '<div class="empty-state">Searching photo library...</div>';
+  el('library-pagination').innerHTML = '';
+
+  try {
+    const data = await api(`/photos/search?q=${encodeURIComponent(query)}&top_k=60`);
+    state.photos = data.results || [];
+    state.photoTotal = Number(data.total || state.photos.length);
+    renderPhotos();
+    el('search-result-count').textContent = `${fmtNumber(state.photoTotal)} results`;
+    renderSearchFacets(data.facets || {});
+    syncSearchLayerVisibility();
+  } catch (error) {
+    state.photos = [];
+    state.photoTotal = 0;
+    el('photo-grid').innerHTML = `<div class="empty-state">${escHtml(error.message)}</div>`;
+    clearSearchFacets();
+    showToast(error.message, 'err');
+  }
+}
+
+function clearSemanticSearch() {
+  clearSemanticSearchState({ preserveInput: false });
+  loadPhotos(1);
+}
+
+async function loadPhotoFilters() {
+  try {
+    const filters = await api('/photo-filters');
+    renderPhotoFilters(filters);
+    state.photoFiltersLoaded = true;
+  } catch (error) {
+    showToast(`Photo filters failed: ${error.message}`, 'err');
+  }
+}
+
+async function loadPhotos(page = 1) {
+  if (state.semanticSearchActive) {
+    clearSemanticSearchState();
+  }
+  state.photoPage = page;
+  el('photo-grid').innerHTML = '<div class="empty-state">Loading photos...</div>';
+  try {
+    const data = await api(`/photos?${buildPhotoParams(page)}`);
+    state.photos = data.photos || [];
+    state.photoTotal = Number(data.total || 0);
+    renderPhotos();
+  } catch (error) {
+    state.photos = [];
+    state.photoTotal = 0;
+    el('photo-grid').innerHTML = `<div class="empty-state">${escHtml(error.message)}</div>`;
+    el('library-pagination').innerHTML = '';
+  }
+}
+
+async function loadLibraryView() {
+  syncSearchLayerVisibility();
+  if (state.semanticSearchActive && state.lastSearchQuery) {
+    await runSemanticSearch({ reuseLast: true });
+    return;
+  }
+  await loadPhotos(state.photoPage || 1);
+}
+
+async function loadObjectsView() {
+  await loadTagBrowser();
+}
+
+async function loadTagBrowser() {
+  el('tag-list').innerHTML = '<div class="empty-state">Loading tags...</div>';
+  el('obj-photo-grid').innerHTML = '<div class="empty-state">Choose a tag to browse photos.</div>';
+  el('obj-count').textContent = '';
+
+  try {
+    const grouped = await api('/objects/tags');
+    state.objectTagsLoaded = true;
+    state.objectTagGroups = grouped || {};
+    renderTagBrowser(grouped);
+    const validTags = Object.values(grouped).flat().map(item => item.tag);
+    if (state.selectedTag && !validTags.includes(state.selectedTag)) {
+      state.selectedTag = null;
+      state.objectPage = 1;
+    }
+    if (!state.selectedTag && validTags.length) {
+      state.selectedTag = validTags[0];
+      state.objectPage = 1;
+      renderTagBrowser(grouped);
+    }
+    if (state.selectedTag) {
+      el('obj-tag-title').textContent = state.selectedTag;
+      await loadObjectPhotos(state.objectPage || 1);
+    }
+  } catch (error) {
+    el('tag-list').innerHTML = `<div class="empty-state">${escHtml(error.message)}</div>`;
+  }
+}
+
+function renderTagBrowser(grouped) {
+  const list = el('tag-list');
+  const groups = Object.entries(grouped || {});
+  if (!groups.length) {
+    list.innerHTML = '<div class="empty-state">No approved tags yet.</div>';
+    return;
+  }
+
+  list.innerHTML = groups.map(([group, tags]) => `
+    <section class="tag-group">
+      <div class="tag-group-header">${escHtml(group)}</div>
+      <div class="tag-group-items">
+        ${tags.map(tag => {
+          const sources = tag.sources || [];
+          const dotClass = sources.includes('yolo') && sources.includes('clip')
+            ? 'dot-both'
+            : sources.includes('yolo')
+              ? 'dot-yolo'
+              : 'dot-clip';
+          return `
+            <button class="tag-item ${state.selectedTag === tag.tag ? 'active' : ''}" data-object-tag="${escHtml(tag.tag)}" type="button">
+              <span class="source-dot ${dotClass}"></span>
+              <span class="tag-name">${escHtml(tag.tag)}</span>
+              <span class="tag-count">${fmtNumber(tag.photo_count)}</span>
+            </button>
+          `;
+        }).join('')}
+      </div>
+    </section>
+  `).join('');
+}
+
+async function loadObjectPhotos(page = 1) {
+  if (!state.selectedTag) {
+    el('obj-photo-grid').innerHTML = '<div class="empty-state">Choose a tag to browse photos.</div>';
+    el('obj-pagination').innerHTML = '';
+    return;
+  }
+  state.objectPage = page;
+  el('obj-tag-title').textContent = state.selectedTag;
+  el('obj-photo-grid').innerHTML = '<div class="empty-state">Loading tagged photos...</div>';
+  try {
+    const data = await api(`/objects/tags/${encodeURIComponent(state.selectedTag)}?page=${page}&per_page=${state.photoPerPage}`);
+    el('obj-count').textContent = `${fmtNumber(data.total || 0)} photos`;
+    renderPhotoCards('obj-photo-grid', data.photos || [], { emptyText: 'No approved detections for this tag yet.' });
+    renderPager('obj-pagination', page, Number(data.total || 0), state.photoPerPage, nextPage => loadObjectPhotos(nextPage));
+  } catch (error) {
+    el('obj-photo-grid').innerHTML = `<div class="empty-state">${escHtml(error.message)}</div>`;
+    el('obj-pagination').innerHTML = '';
+  }
+}
+
+function toggleVocabPanel(forceOpen = null) {
+  const panel = el('vocab-panel');
+  const nextHidden = forceOpen == null ? !panel.hidden : !forceOpen;
+  panel.hidden = nextHidden;
+}
+
+async function loadVocab() {
+  const tbody = el('vocab-tbody');
+  tbody.innerHTML = '<tr><td colspan="5" class="table-empty">Loading vocabulary...</td></tr>';
+  try {
+    const vocab = await api('/objects/vocabulary');
+    if (!vocab.length) {
+      tbody.innerHTML = '<tr><td colspan="5" class="table-empty">No vocabulary entries yet.</td></tr>';
+      return;
+    }
+    tbody.innerHTML = vocab.map(entry => `
+      <tr>
+        <td>${escHtml(entry.tag_group)}</td>
+        <td>${escHtml(entry.tag_name)}</td>
+        <td>${escHtml((entry.prompts || []).join(', '))}</td>
+        <td class="table-check"><input type="checkbox" ${entry.enabled ? 'checked' : ''} disabled /></td>
+        <td><button class="btn btn-small btn-danger" data-delete-vocab="${entry.vocab_id}" type="button">Delete</button></td>
+      </tr>
+    `).join('');
+  } catch (error) {
+    tbody.innerHTML = `<tr><td colspan="5" class="table-empty">${escHtml(error.message)}</td></tr>`;
+  }
+}
+
+async function deleteVocab(vocabId) {
+  const confirmed = window.confirm('Delete this vocabulary entry?');
+  if (!confirmed) {
+    return;
+  }
+  try {
+    await apiDelete(`/objects/vocabulary/${vocabId}`);
+    showToast('Vocabulary entry deleted.', 'ok');
+    await loadVocab();
+  } catch (error) {
+    showToast(error.message, 'err');
+  }
+}
+
+async function addVocab() {
+  const payload = {
+    tag_group: el('new-vocab-group').value.trim(),
+    tag_name: el('new-vocab-name').value.trim(),
+    prompts: el('new-vocab-prompts').value
+      .split('\n')
+      .map(line => line.trim())
+      .filter(Boolean),
+    enabled: el('new-vocab-enabled').checked,
+  };
+  if (!payload.tag_group || !payload.tag_name || !payload.prompts.length) {
+    showToast('Fill in group, tag name, and at least one prompt.', 'err');
+    return;
+  }
+  try {
+    await apiPost('/objects/vocabulary', payload);
+    el('new-vocab-group').value = '';
+    el('new-vocab-name').value = '';
+    el('new-vocab-prompts').value = '';
+    el('new-vocab-enabled').checked = true;
+    showToast('Vocabulary entry added.', 'ok');
+    await loadVocab();
+  } catch (error) {
+    showToast(error.message, 'err');
+  }
 }
 
 function renderSettings() {
@@ -1314,6 +2096,12 @@ async function refreshStatus() {
 }
 
 async function runWorkflow(name) {
+  if (
+    name === 'delivery' &&
+    !window.confirm('Run delivery workflow 4-7? This can reorganize files and push changes into the verified output.')
+  ) {
+    return;
+  }
   try {
     const result = await apiPost(`/pipeline/workflows/${name}`);
     showToast(`Started ${result.started}.`, 'ok');
@@ -1324,6 +2112,18 @@ async function runWorkflow(name) {
 }
 
 async function runPhase(phaseId) {
+  if (
+    (
+      phaseId === 'process' &&
+      !window.confirm('Run Process now? This can perform OCR and image analysis across the current intake scope.')
+    ) ||
+    (
+      phaseId === 'push' &&
+      !window.confirm('Run Push now? This can copy approved output into the destination tree.')
+    )
+  ) {
+    return;
+  }
   try {
     const result = await apiPost(`/pipeline/run/${phaseId}`);
     showToast(`Started ${result.started}.`, 'ok');
@@ -1368,6 +2168,9 @@ async function saveClusterLabel() {
     await apiPost(`/clusters/${cluster.cluster_id}/label`, { person_label: personLabel });
     showToast('Label saved.', 'ok');
     await loadClusters();
+    if (state.photoFiltersLoaded) {
+      await loadPhotoFilters();
+    }
   } catch (error) {
     showToast(error.message, 'err');
   }
@@ -1386,6 +2189,9 @@ async function approveCluster() {
     await apiPost(`/clusters/${cluster.cluster_id}/approve`);
     showToast('Cluster approved.', 'ok');
     await loadClusters();
+    if (state.photoFiltersLoaded) {
+      await loadPhotoFilters();
+    }
     await refreshStatus();
   } catch (error) {
     showToast(error.message, 'err');
@@ -1404,6 +2210,9 @@ async function approveSuggestedCluster(personLabel) {
     state.selectedClusterId = null;
     showToast(`Approved cluster as ${personLabel}.`, 'ok');
     await loadClusters();
+    if (state.photoFiltersLoaded) {
+      await loadPhotoFilters();
+    }
     await refreshStatus();
   } catch (error) {
     showToast(error.message, 'err');
@@ -1412,6 +2221,15 @@ async function approveSuggestedCluster(personLabel) {
 
 async function untagCluster() {
   if (!state.selectedClusterId) {
+    return;
+  }
+  if (!isPrototypeMode() && !isPersonMode() && state.selectedFaceIds.size > 0) {
+    await removeSelectedFaces();
+    return;
+  }
+
+  const confirmed = window.confirm(`Untag the entire cluster ${state.selectedClusterId}?`);
+  if (!confirmed) {
     return;
   }
   try {
@@ -1426,6 +2244,10 @@ async function untagCluster() {
 
 async function markClusterNoise() {
   if (!state.selectedClusterId) {
+    return;
+  }
+  const confirmed = window.confirm(`Mark cluster ${state.selectedClusterId} as noise?`);
+  if (!confirmed) {
     return;
   }
   try {
@@ -1481,8 +2303,28 @@ function buildPhotoInfo(photo) {
   const people = (photo.faces || [])
     .filter(face => face.person_label)
     .map(face => face.person_label);
-  const tags = (photo.tags || []).map(tag => tag.tag);
-  const detections = (photo.detections || []).map(detection => `${detection.tag} (${(detection.confidence || 0).toFixed(2)})`);
+  const tags = (photo.tags || []).map(tag => `${tag.tag}${tag.source ? ` (${tag.source})` : ''}`);
+  const faces = (photo.faces || []).map(face => (
+    face.person_label
+      ? `${face.person_label} (${face.cluster_approved ? 'approved' : 'pending'})`
+      : `Cluster ${face.cluster_id || '?'} unlabeled`
+  ));
+  const detections = (photo.detections || []).map(detection => `
+    <div class="info-action-row">
+      <div>
+        <strong>${escHtml(detection.tag)}</strong>
+        <div class="info-line">${escHtml(detection.model || 'model')} | ${(detection.confidence || 0).toFixed(2)}</div>
+      </div>
+      <button
+        class="btn btn-small ${detection.approved ? 'btn-danger' : ''}"
+        data-detection-action="${detection.approved ? 'reject' : 'approve'}"
+        data-detection-id="${detection.detection_id}"
+        type="button"
+      >
+        ${detection.approved ? 'Reject' : 'Approve'}
+      </button>
+    </div>
+  `).join('');
 
   return `
     ${infoSection('Metadata', [
@@ -1493,7 +2335,11 @@ function buildPhotoInfo(photo) {
     ])}
     ${infoPillsSection('People', people)}
     ${infoPillsSection('Tags', tags)}
-    ${infoPillsSection('Detections', detections)}
+    ${infoPillsSection('Faces', faces)}
+    <section class="info-section">
+      <h4>Detections</h4>
+      ${detections || '<div class="info-line">None</div>'}
+    </section>
   `;
 }
 
@@ -1514,12 +2360,65 @@ function closePhotoModal() {
   state.photoModalId = null;
 }
 
+async function approveDetection(detectionId) {
+  if (state.modalActionBusy) {
+    return;
+  }
+  state.modalActionBusy = true;
+  try {
+    await apiPost(`/objects/detections/${detectionId}/approve`);
+    if (state.photoFiltersLoaded) {
+      await loadPhotoFilters();
+    }
+    if (state.activeTab === 'objects') {
+      await loadTagBrowser();
+    }
+    if (state.photoModalId != null) {
+      await openPhotoModal(state.photoModalId);
+    }
+    showToast('Detection approved.', 'ok');
+  } catch (error) {
+    showToast(error.message, 'err');
+  } finally {
+    state.modalActionBusy = false;
+  }
+}
+
+async function rejectDetection(detectionId) {
+  if (state.modalActionBusy) {
+    return;
+  }
+  state.modalActionBusy = true;
+  try {
+    await apiPost(`/objects/detections/${detectionId}/reject`);
+    if (state.photoFiltersLoaded) {
+      await loadPhotoFilters();
+    }
+    if (state.activeTab === 'objects') {
+      await loadTagBrowser();
+    }
+    if (state.photoModalId != null) {
+      await openPhotoModal(state.photoModalId);
+    }
+    showToast('Detection rejected.', 'ok');
+  } catch (error) {
+    showToast(error.message, 'err');
+  } finally {
+    state.modalActionBusy = false;
+  }
+}
+
 async function loadSettings() {
   try {
     state.settings = await api('/settings');
     state.settingsLoaded = true;
+    state.searchLayerEnabled = Boolean(state.settings.search_layer_enabled);
     renderSettings();
     renderScope();
+    syncSearchLayerVisibility();
+    if (state.searchLayerEnabled) {
+      await refreshSavedSearches();
+    }
   } catch (error) {
     showToast(`Settings failed: ${error.message}`, 'err');
   }
@@ -1572,13 +2471,24 @@ async function clearDatabase() {
     state.prototypeGroups = [];
     state.selectedPrototypeLabel = null;
     state.personReviewData = null;
+    state.lastSelectedFaceIndex = null;
+    state.semanticSearchActive = false;
+    state.lastSearchQuery = '';
+    state.savedSearches = [];
+    state.selectedTag = null;
+    state.objectPage = 1;
+    state.objectTagsLoaded = false;
+    state.objectTagGroups = {};
     clearFaceSelection();
     await Promise.all([refreshStatus(), loadSettings()]);
     if (state.activeTab === 'review') {
       await loadReview();
     }
     if (state.activeTab === 'library') {
-      await loadPhotos(1);
+      await loadLibraryView();
+    }
+    if (state.activeTab === 'objects') {
+      await loadObjectsView();
     }
   } catch (error) {
     showToast(error.message, 'err');
@@ -1683,16 +2593,66 @@ function bindEvents() {
   });
   el('btn-review-whole-file').addEventListener('click', () => toggleWholeFileReview());
   el('btn-review-move-selected').addEventListener('click', () => moveSelectedFaces());
-  el('btn-review-remove-selected').addEventListener('click', () => removeSelectedPersonFace());
-  el('review-destination-input').addEventListener('input', () => renderSelectedCluster());
+  el('btn-review-select-all').addEventListener('click', () => selectAllReviewFaces());
+  el('btn-review-clear-selection').addEventListener('click', () => clearFaceSelectionAndRender());
+  el('btn-review-undo-move').addEventListener('click', () => undoLastMove());
+  el('btn-review-merge-cluster').addEventListener('click', () => mergeCluster());
+  el('btn-review-remove-selected').addEventListener('click', () => removeSelectedFaces());
+  el('review-destination-input').addEventListener('input', () => {
+    if (el('review-destination-input').value.trim()) {
+      el('review-destination-cluster').value = '';
+    }
+    renderSelectedCluster();
+  });
+  el('review-destination-cluster').addEventListener('change', () => {
+    if (el('review-destination-cluster').value) {
+      el('review-destination-input').value = '';
+    }
+    renderSelectedCluster();
+  });
+  el('review-merge-target').addEventListener('change', () => renderSelectedCluster());
   el('cluster-crops').addEventListener('click', event => {
     const card = event.target.closest('[data-face-id]');
     if (!card) {
       return;
     }
-    toggleFaceSelection(Number(card.dataset.faceId));
+    toggleFaceSelection(
+      Number(card.dataset.faceId),
+      Number(card.dataset.faceIndex),
+      event.shiftKey
+    );
   });
 
+  el('btn-search').addEventListener('click', () => runSemanticSearch());
+  el('btn-search-clear').addEventListener('click', () => clearSemanticSearch());
+  el('btn-search-save').addEventListener('click', () => saveCurrentSearch());
+  el('search-input').addEventListener('keydown', event => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      runSemanticSearch();
+    }
+  });
+  el('search-saved').addEventListener('change', event => {
+    const searchId = Number(event.target.value || 0);
+    const saved = state.savedSearches.find(item => item.search_id === searchId);
+    if (!saved?.query?.q) {
+      return;
+    }
+    el('search-input').value = saved.query.q;
+    runSemanticSearch();
+    event.target.value = '';
+  });
+  el('btn-quick-search').addEventListener('click', () => {
+    applyQuickQuery(el('quick-search').value);
+    loadPhotos(1);
+  });
+  el('quick-search').addEventListener('keydown', event => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      applyQuickQuery(el('quick-search').value);
+      loadPhotos(1);
+    }
+  });
   el('btn-apply-library-filters').addEventListener('click', () => loadPhotos(1));
   el('btn-reset-library-filters').addEventListener('click', () => {
     el('filter-person').value = '';
@@ -1701,14 +2661,46 @@ function bindEvents() {
     el('filter-month').value = '';
     el('filter-query').value = '';
     el('filter-undated').checked = false;
+    updateLibraryFieldLocks();
     loadPhotos(1);
   });
+  el('filter-undated').addEventListener('change', () => updateLibraryFieldLocks());
   el('photo-grid').addEventListener('click', event => {
     const card = event.target.closest('[data-photo-id]');
     if (!card) {
       return;
     }
     openPhotoModal(Number(card.dataset.photoId));
+  });
+  el('tag-list').addEventListener('click', event => {
+    const button = event.target.closest('[data-object-tag]');
+    if (!button) {
+      return;
+    }
+    state.selectedTag = button.dataset.objectTag;
+    state.objectPage = 1;
+    renderTagBrowser(state.objectTagGroups || {});
+    loadObjectPhotos(1);
+  });
+  el('obj-photo-grid').addEventListener('click', event => {
+    const card = event.target.closest('[data-photo-id]');
+    if (!card) {
+      return;
+    }
+    openPhotoModal(Number(card.dataset.photoId));
+  });
+  el('btn-vocab-manager').addEventListener('click', async () => {
+    toggleVocabPanel(true);
+    await loadVocab();
+  });
+  el('btn-vocab-close').addEventListener('click', () => toggleVocabPanel(false));
+  el('btn-add-vocab').addEventListener('click', () => addVocab());
+  el('vocab-tbody').addEventListener('click', event => {
+    const button = event.target.closest('[data-delete-vocab]');
+    if (!button) {
+      return;
+    }
+    deleteVocab(Number(button.dataset.deleteVocab));
   });
 
   el('btn-close-photo-modal').addEventListener('click', () => closePhotoModal());
@@ -1717,11 +2709,77 @@ function bindEvents() {
       closePhotoModal();
     }
   });
+  el('photo-modal-info').addEventListener('click', event => {
+    const button = event.target.closest('[data-detection-action]');
+    if (!button) {
+      return;
+    }
+    const detectionId = Number(button.dataset.detectionId);
+    if (!Number.isFinite(detectionId)) {
+      return;
+    }
+    if (button.dataset.detectionAction === 'approve') {
+      approveDetection(detectionId);
+    } else {
+      rejectDetection(detectionId);
+    }
+  });
 
   el('btn-save-settings').addEventListener('click', () => saveSettings());
   el('btn-clear-db').addEventListener('click', () => clearDatabase());
   el('btn-refresh-log').addEventListener('click', () => loadLog());
   el('btn-expand-log').addEventListener('click', () => toggleLogExpanded());
+
+  document.addEventListener('keydown', event => {
+    if (state.activeTab !== 'review') {
+      return;
+    }
+    if (event.key === 'Escape') {
+      if (state.selectedFaceIds.size) {
+        event.preventDefault();
+        clearFaceSelectionAndRender();
+      }
+      return;
+    }
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'a' && !isTextEntryTarget(event.target)) {
+      event.preventDefault();
+      selectAllReviewFaces();
+      return;
+    }
+    if (isTextEntryTarget(event.target)) {
+      return;
+    }
+
+    if (event.key === 'Enter' && !isPrototypeMode() && !isPersonMode()) {
+      event.preventDefault();
+      approveCluster();
+      return;
+    }
+    if ((event.key === 'u' || event.key === 'U') && !isPrototypeMode() && !isPersonMode()) {
+      event.preventDefault();
+      untagCluster();
+      return;
+    }
+    if ((event.key === 'n' || event.key === 'N') && !isPrototypeMode() && !isPersonMode()) {
+      event.preventDefault();
+      markClusterNoise();
+      return;
+    }
+    if (event.key === 'Delete' && !isPrototypeMode() && state.selectedFaceIds.size) {
+      event.preventDefault();
+      removeSelectedFaces();
+      return;
+    }
+    if (event.key === 'ArrowRight') {
+      event.preventDefault();
+      navigateReviewSelection(1);
+      return;
+    }
+    if (event.key === 'ArrowLeft') {
+      event.preventDefault();
+      navigateReviewSelection(-1);
+    }
+  });
 }
 
 function startAutoRefresh() {

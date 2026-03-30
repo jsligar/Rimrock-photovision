@@ -454,6 +454,11 @@ h3 {
   color: var(--ink-soft);
 }
 
+.detail-meta {
+  color: var(--ink-soft);
+  font-size: 14px;
+}
+
 .phase-status {
   font-family: var(--mono);
   font-size: 11px;
@@ -700,6 +705,10 @@ h3 {
   gap: 8px;
 }
 
+.field-stack {
+  align-content: start;
+}
+
 .field span {
   color: var(--ink-soft);
   font-size: 12px;
@@ -752,6 +761,212 @@ h3 {
 
 .priority-pill.low {
   color: var(--ink-soft);
+}
+
+.object-layout,
+.photos-layout {
+  display: grid;
+  grid-template-columns: minmax(260px, 320px) minmax(0, 1fr);
+  gap: 18px;
+}
+
+.object-main,
+.photos-main {
+  min-width: 0;
+}
+
+.object-sidebar {
+  min-height: 0;
+}
+
+.tag-browser-list {
+  display: grid;
+  gap: 14px;
+  max-height: calc(100vh - 220px);
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.tag-group {
+  display: grid;
+  gap: 10px;
+}
+
+.tag-group-header {
+  font-family: var(--mono);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--ink-soft);
+}
+
+.tag-group-items {
+  display: grid;
+  gap: 8px;
+}
+
+.tag-item,
+.facet-item {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.58);
+  color: var(--ink);
+  padding: 10px 12px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.tag-item:hover,
+.tag-item.active,
+.facet-item:hover {
+  border-color: rgba(36, 93, 99, 0.28);
+  background: rgba(36, 93, 99, 0.06);
+}
+
+.source-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  flex: 0 0 auto;
+}
+
+.dot-yolo {
+  background: #2c7a52;
+}
+
+.dot-clip {
+  background: #245d63;
+}
+
+.dot-both {
+  background: linear-gradient(135deg, #2c7a52, #245d63);
+}
+
+.tag-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tag-count,
+.facet-count {
+  color: var(--ink-soft);
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.semantic-search,
+.quick-search {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto auto auto auto;
+  gap: 10px;
+  margin-bottom: 14px;
+  align-items: center;
+}
+
+.quick-search {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.semantic-search input,
+.quick-search input,
+.vocab-table input,
+.vocab-table textarea {
+  border: 1px solid var(--line-strong);
+  background: rgba(255, 255, 255, 0.8);
+  color: var(--ink);
+  border-radius: 12px;
+  padding: 11px 12px;
+  width: 100%;
+}
+
+.semantic-search input:focus,
+.quick-search input:focus,
+.vocab-table input:focus,
+.vocab-table textarea:focus {
+  outline: 2px solid rgba(36, 93, 99, 0.18);
+  border-color: rgba(36, 93, 99, 0.28);
+}
+
+.search-facets {
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.45);
+  padding: 14px;
+  display: grid;
+  gap: 16px;
+  align-self: start;
+}
+
+.search-facets[hidden],
+.vocab-panel[hidden] {
+  display: none;
+}
+
+.facet-group {
+  display: grid;
+  gap: 8px;
+}
+
+.facet-group h4 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.table-wrap {
+  overflow: auto;
+}
+
+.vocab-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.vocab-table th,
+.vocab-table td {
+  padding: 10px;
+  border-bottom: 1px solid var(--line);
+  vertical-align: top;
+  text-align: left;
+  font-size: 13px;
+}
+
+.vocab-table textarea {
+  resize: vertical;
+  min-height: 62px;
+}
+
+.table-empty {
+  text-align: center;
+  color: var(--ink-soft);
+}
+
+.table-check {
+  text-align: center;
+}
+
+.table-check input {
+  width: auto;
+}
+
+.info-action-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+  padding: 8px 0;
+  border-top: 1px solid var(--line);
+}
+
+.info-action-row:first-of-type {
+  border-top: 0;
+  padding-top: 0;
 }
 
 .crop-grid,
@@ -1002,6 +1217,8 @@ h3 {
   .workflow-grid,
   .settings-grid,
   .review-layout,
+  .object-layout,
+  .photos-layout,
   .modal-body {
     grid-template-columns: 1fr;
   }
@@ -1009,7 +1226,8 @@ h3 {
   .scope-grid,
   .stats-grid,
   .filter-grid,
-  .form-grid {
+  .form-grid,
+  .semantic-search {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
@@ -1038,7 +1256,9 @@ h3 {
   .stats-grid,
   .filter-grid,
   .form-grid,
-  .workflow-metrics {
+  .workflow-metrics,
+  .semantic-search,
+  .quick-search {
     grid-template-columns: 1fr;
   }
 

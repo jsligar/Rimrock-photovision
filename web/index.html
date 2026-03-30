@@ -26,6 +26,7 @@
     <nav class="tabs" aria-label="Primary">
       <button class="tab active" data-tab="intake" type="button">Intake</button>
       <button class="tab" data-tab="review" type="button">Cluster Review</button>
+      <button class="tab" data-tab="objects" type="button">Objects & Pets</button>
       <button class="tab" data-tab="library" type="button">Library</button>
       <button class="tab" data-tab="settings" type="button">Settings</button>
     </nav>
@@ -212,12 +213,29 @@
               </div>
               <div class="cluster-suggestions" id="cluster-suggestions"></div>
               <div class="detail-grid detail-grid--secondary">
-                <label class="field">
+                <label class="field field-stack">
                   <span id="selection-destination-label">Move Selected To Person</span>
+                  <select id="review-destination-cluster">
+                    <option value="">Or move into an existing cluster...</option>
+                  </select>
                   <input type="text" id="review-destination-input" placeholder="Enter a person name" />
                 </label>
                 <div class="detail-actions">
                   <button class="btn" id="btn-review-move-selected" type="button">Move Selected</button>
+                  <button class="btn" id="btn-review-select-all" type="button">Select All</button>
+                  <button class="btn" id="btn-review-clear-selection" type="button">Clear</button>
+                </div>
+              </div>
+              <div class="detail-grid detail-grid--secondary">
+                <label class="field">
+                  <span>Merge Current Cluster Into</span>
+                  <select id="review-merge-target">
+                    <option value="">Choose a merge target...</option>
+                  </select>
+                </label>
+                <div class="detail-actions">
+                  <button class="btn" id="btn-review-merge-cluster" type="button">Merge Cluster</button>
+                  <button class="btn" id="btn-review-undo-move" type="button">Undo Last Move</button>
                   <button class="btn btn-warn" id="btn-review-remove-selected" type="button">Remove Selected</button>
                 </div>
               </div>
@@ -240,6 +258,76 @@
         </div>
       </section>
 
+      <section class="page" id="page-objects">
+        <div class="object-layout">
+          <aside class="card object-sidebar">
+            <div class="card-head">
+              <div>
+                <div class="eyebrow">Objects</div>
+                <h3>Tags</h3>
+              </div>
+              <button class="btn btn-small" id="btn-vocab-manager" type="button">Vocabulary</button>
+            </div>
+            <div class="tag-browser-list" id="tag-list">
+              <div class="empty-state">Loading tags...</div>
+            </div>
+          </aside>
+
+          <section class="object-main">
+            <section class="card">
+              <div class="card-head">
+                <div>
+                  <div class="eyebrow">Review</div>
+                  <h3 id="obj-tag-title">Select a tag</h3>
+                </div>
+                <div class="detail-meta" id="obj-count"></div>
+              </div>
+              <div class="photo-grid" id="obj-photo-grid">
+                <div class="empty-state">Choose a tag to browse photos.</div>
+              </div>
+              <div class="pagination" id="obj-pagination"></div>
+            </section>
+
+            <section class="card vocab-panel" id="vocab-panel" hidden>
+              <div class="card-head">
+                <div>
+                  <div class="eyebrow">Vocabulary</div>
+                  <h3>Objects & Prompt Terms</h3>
+                </div>
+                <div class="inline-actions">
+                  <button class="btn btn-small" id="btn-vocab-close" type="button">Close</button>
+                </div>
+              </div>
+              <div class="table-wrap">
+                <table class="vocab-table">
+                  <thead>
+                    <tr>
+                      <th>Group</th>
+                      <th>Tag</th>
+                      <th>Prompts</th>
+                      <th>Enabled</th>
+                      <th></th>
+                    </tr>
+                  </thead>
+                  <tbody id="vocab-tbody">
+                    <tr><td colspan="5" class="table-empty">Loading vocabulary...</td></tr>
+                  </tbody>
+                  <tfoot>
+                    <tr>
+                      <td><input type="text" id="new-vocab-group" placeholder="group" /></td>
+                      <td><input type="text" id="new-vocab-name" placeholder="tag name" /></td>
+                      <td><textarea id="new-vocab-prompts" rows="2" placeholder="one prompt per line"></textarea></td>
+                      <td class="table-check"><input type="checkbox" id="new-vocab-enabled" checked /></td>
+                      <td><button class="btn btn-primary" id="btn-add-vocab" type="button">Add Tag</button></td>
+                    </tr>
+                  </tfoot>
+                </table>
+              </div>
+            </section>
+          </section>
+        </div>
+      </section>
+
       <section class="page" id="page-library">
         <section class="card">
           <div class="card-head">
@@ -248,6 +336,22 @@
               <h3>Browse Photos</h3>
             </div>
             <div class="detail-meta" id="library-result-count">0 photos</div>
+          </div>
+
+          <div class="semantic-search" id="semantic-search-bar" hidden>
+            <input type="text" id="search-input" placeholder="Describe what you're looking for: sunset with dog, wedding speech, receipt" />
+            <button class="btn btn-primary" id="btn-search" type="button">Search</button>
+            <button class="btn" id="btn-search-clear" type="button" hidden>Clear</button>
+            <select id="search-saved" hidden>
+              <option value="">Saved searches...</option>
+            </select>
+            <button class="btn" id="btn-search-save" type="button" hidden>Save</button>
+            <span class="detail-meta" id="search-result-count"></span>
+          </div>
+
+          <div class="quick-search">
+            <input type="text" id="quick-search" placeholder="Quick query: person:Alice tag:dog year:2021 month:06 undated" />
+            <button class="btn" id="btn-quick-search" type="button">Apply Query</button>
           </div>
 
           <div class="filter-grid">
@@ -286,11 +390,29 @@
             <button class="btn" id="btn-reset-library-filters" type="button">Reset</button>
           </div>
 
-          <div class="photo-grid" id="photo-grid">
-            <div class="empty-state">Loading library...</div>
-          </div>
+          <div class="photos-layout">
+            <aside class="search-facets" id="search-facets" hidden>
+              <div class="facet-group">
+                <h4>People</h4>
+                <div id="facet-people"></div>
+              </div>
+              <div class="facet-group">
+                <h4>Tags</h4>
+                <div id="facet-tags"></div>
+              </div>
+              <div class="facet-group">
+                <h4>Years</h4>
+                <div id="facet-years"></div>
+              </div>
+            </aside>
 
-          <div class="pagination" id="library-pagination"></div>
+            <div class="photos-main">
+              <div class="photo-grid" id="photo-grid">
+                <div class="empty-state">Loading library...</div>
+              </div>
+              <div class="pagination" id="library-pagination"></div>
+            </div>
+          </div>
         </section>
       </section>
 
