@@ -170,9 +170,19 @@
             <div class="card-head">
               <div>
                 <div class="eyebrow">Review Queue</div>
-                <h3>Clusters</h3>
+                <h3 id="review-sidebar-title">Clusters</h3>
               </div>
-              <button class="btn btn-small" id="btn-refresh-clusters" type="button">Refresh</button>
+              <div class="inline-actions">
+                <button class="btn btn-small" id="btn-refresh-clusters" type="button">Refresh</button>
+              </div>
+            </div>
+            <div class="review-sidebar-toolbar">
+              <div class="mode-toggle" role="tablist" aria-label="Review mode">
+                <button class="btn btn-small active" id="btn-review-mode-cluster" type="button">By Cluster</button>
+                <button class="btn btn-small" id="btn-review-mode-person" type="button">By Person</button>
+                <button class="btn btn-small" id="btn-review-mode-prototype" type="button">Prototype Triage</button>
+              </div>
+              <div class="sidebar-caption" id="review-sidebar-caption">Cluster-by-cluster review queue.</div>
             </div>
             <div class="cluster-list" id="cluster-list">
               <div class="empty-state">Loading clusters...</div>
@@ -183,7 +193,7 @@
             <div class="card review-detail">
               <div class="card-head">
                 <div>
-                  <div class="eyebrow">Selected Cluster</div>
+                  <div class="eyebrow" id="review-detail-eyebrow">Selected Cluster</div>
                   <h3 id="cluster-detail-title">Choose a cluster</h3>
                 </div>
                 <div class="detail-meta" id="cluster-detail-meta">-</div>
@@ -198,16 +208,28 @@
                   <button class="btn" id="btn-cluster-save-label" type="button">Save Label</button>
                   <button class="btn btn-warn" id="btn-cluster-untag" type="button">Untag</button>
                   <button class="btn btn-danger" id="btn-cluster-noise" type="button">Mark Noise</button>
+                  <button class="btn" id="btn-review-whole-file" type="button">Whole File</button>
                 </div>
               </div>
+              <div class="detail-grid detail-grid--secondary">
+                <label class="field">
+                  <span id="selection-destination-label">Move Selected To Person</span>
+                  <input type="text" id="review-destination-input" placeholder="Enter a person name" />
+                </label>
+                <div class="detail-actions">
+                  <button class="btn" id="btn-review-move-selected" type="button">Move Selected</button>
+                  <button class="btn btn-warn" id="btn-review-remove-selected" type="button">Remove Selected</button>
+                </div>
+              </div>
+              <div class="sidebar-caption" id="review-selection-caption">No faces selected.</div>
               <div class="priority-strip" id="cluster-priority-strip"></div>
             </div>
 
             <div class="card">
               <div class="card-head">
                 <div>
-                  <div class="eyebrow">Crops</div>
-                  <h3>Cluster Faces</h3>
+                  <div class="eyebrow" id="review-grid-eyebrow">Crops</div>
+                  <h3 id="review-grid-title">Cluster Faces</h3>
                 </div>
               </div>
               <div class="crop-grid" id="cluster-crops">

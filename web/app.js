@@ -23,8 +23,17 @@ const state = {
   status: null,
   settings: null,
   clusters: [],
+  personFiles: [],
   selectedClusterId: null,
-  clusterCrops: null,
+  selectedPersonLabel: null,
+  selectedPersonClusterId: null,
+  reviewFaces: null,
+  reviewMode: 'cluster',
+  prototypeGroups: [],
+  selectedPrototypeLabel: null,
+  prototypeScopeClusterId: null,
+  personReviewData: null,
+  selectedFaceIds: new Set(),
   photoFiltersLoaded: false,
   settingsLoaded: false,
   photos: [],
@@ -155,7 +164,7 @@ function openTab(tabId) {
   });
 
   if (tabId === 'review') {
-    loadClusters();
+    loadReview();
   } else if (tabId === 'library') {
     if (!state.photoFiltersLoaded) {
       loadPhotoFilters().finally(() => loadPhotos(1));
@@ -308,8 +317,179 @@ function clusterDisplayName(cluster) {
   return cluster.person_label || `Cluster ${cluster.cluster_id}`;
 }
 
+function selectedCluster() {
+  return state.clusters.find(item => item.cluster_id === state.selectedClusterId) || null;
+}
+
+function isPrototypeMode() {
+  return state.reviewMode === 'prototype';
+}
+
+function isPersonMode() {
+  return state.reviewMode === 'people';
+}
+
+function normalizePrototypeLabel(label) {
+  return String(label || '').trim().toLowerCase();
+}
+
+function activePrototypeScopeQuery() {
+  return Number.isFinite(state.prototypeScopeClusterId)
+    ? `?cluster_id=${encodeURIComponent(state.prototypeScopeClusterId)}`
+    : '';
+}
+
+function derivePrototypeScopeClusterId() {
+  const cluster = selectedCluster();
+  if (!cluster) {
+    return null;
+  }
+  return (!cluster.person_label || cluster.is_noise) ? cluster.cluster_id : null;
+}
+
+function clearFaceSelection() {
+  state.selectedFaceIds.clear();
+}
+
+function selectedPersonFile() {
+  return state.personFiles.find(item => normalizePrototypeLabel(item.person_label) === normalizePrototypeLabel(state.selectedPersonLabel)) || null;
+}
+
+function buildPersonFiles(clusters) {
+  const grouped = new Map();
+
+  (clusters || []).forEach(cluster => {
+    const personLabel = String(cluster.person_label || '').trim();
+    if (!personLabel || cluster.is_noise) {
+      return;
+    }
+    const key = normalizePrototypeLabel(personLabel);
+    if (!grouped.has(key)) {
+      grouped.set(key, {
+        person_label: personLabel,
+        face_count: 0,
+        photo_count: 0,
+        cluster_count: 0,
+        approved_cluster_count: 0,
+        representative_cluster_id: cluster.cluster_id,
+        representative_face_count: cluster.face_count || 0,
+      });
+    }
+
+    const entry = grouped.get(key);
+    entry.face_count += Number(cluster.face_count || 0);
+    entry.photo_count += Number(cluster.photo_count || 0);
+    entry.cluster_count += 1;
+    if (cluster.approved) {
+      entry.approved_cluster_count += 1;
+    }
+
+    const currentRepApproved = (clusters.find(item => item.cluster_id === entry.representative_cluster_id)?.approved) ? 1 : 0;
+    const candidateApproved = cluster.approved ? 1 : 0;
+    const candidateFaceCount = Number(cluster.face_count || 0);
+    const repFaceCount = Number(entry.representative_face_count || 0);
+    if (
+      candidateApproved > currentRepApproved ||
+      (candidateApproved === currentRepApproved && candidateFaceCount > repFaceCount)
+    ) {
+      entry.representative_cluster_id = cluster.cluster_id;
+      entry.representative_face_count = candidateFaceCount;
+    }
+  });
+
+  return Array.from(grouped.values()).sort((a, b) => {
+    if (b.face_count !== a.face_count) {
+      return b.face_count - a.face_count;
+    }
+    return a.person_label.localeCompare(b.person_label);
+  });
+}
+
+function currentReviewSelection() {
+  return (state.reviewFaces || []).filter(face => state.selectedFaceIds.has(face.face_id));
+}
+
+function renderReviewModeToggle() {
+  el('btn-review-mode-cluster').classList.toggle('active', state.reviewMode === 'cluster');
+  el('btn-review-mode-person').classList.toggle('active', isPersonMode());
+  el('btn-review-mode-prototype').classList.toggle('active', isPrototypeMode());
+  el('review-sidebar-title').textContent = isPrototypeMode()
+    ? 'Prototype Groups'
+    : isPersonMode()
+      ? 'Person Files'
+      : 'Clusters';
+  el('review-sidebar-caption').textContent = isPrototypeMode()
+    ? (
+      Number.isFinite(state.prototypeScopeClusterId)
+        ? `Prototype triage is scoped to cluster ${state.prototypeScopeClusterId}.`
+        : 'Prototype triage groups unknown faces by the closest known person.'
+    )
+    : (isPersonMode()
+      ? 'Open a person file to inspect and clean up mismatched faces across clusters.'
+      : 'Cluster-by-cluster review queue.');
+}
+
 function renderClusters() {
   const container = el('cluster-list');
+  renderReviewModeToggle();
+
+  if (isPersonMode()) {
+    if (!state.personFiles.length) {
+      container.innerHTML = '<div class="empty-state">No labeled person files are available yet.</div>';
+      renderSelectedCluster();
+      return;
+    }
+
+    container.innerHTML = state.personFiles.map(person => {
+      const active = normalizePrototypeLabel(state.selectedPersonLabel) === normalizePrototypeLabel(person.person_label);
+      return `
+        <button class="cluster-item ${active ? 'active' : ''}" data-person-label="${escHtml(person.person_label)}" data-person-cluster-id="${person.representative_cluster_id}" type="button">
+          <div class="cluster-item-top">
+            <div class="cluster-item-title">${escHtml(person.person_label)}</div>
+            <div class="phase-status">${person.approved_cluster_count > 0 ? 'approved' : 'review'}</div>
+          </div>
+          <div class="cluster-item-meta">Faces ${fmtNumber(person.face_count)} | Clusters ${fmtNumber(person.cluster_count)}</div>
+          <div class="cluster-item-bottom">
+            <span class="cluster-item-meta">Photos ${fmtNumber(person.photo_count)}</span>
+            <span class="cluster-item-meta">Rep cluster ${fmtNumber(person.representative_cluster_id)}</span>
+          </div>
+        </button>
+      `;
+    }).join('');
+    renderSelectedCluster();
+    return;
+  }
+
+  if (isPrototypeMode()) {
+    if (!state.prototypeGroups.length) {
+      container.innerHTML = '<div class="empty-state">No faces are waiting in prototype triage.</div>';
+      renderSelectedCluster();
+      return;
+    }
+
+    container.innerHTML = state.prototypeGroups.map(group => {
+      const active = normalizePrototypeLabel(state.selectedPrototypeLabel) === normalizePrototypeLabel(group.person_label);
+      const isUnknown = normalizePrototypeLabel(group.person_label) === '__unknown__';
+      const meta = isUnknown
+        ? `Faces ${fmtNumber(group.face_count)} | below threshold`
+        : `Faces ${fmtNumber(group.face_count)} | avg ${Number(group.avg_similarity || 0).toFixed(2)} similarity`;
+      return `
+        <button class="cluster-item ${active ? 'active' : ''}" data-prototype-label="${escHtml(group.person_label)}" type="button">
+          <div class="cluster-item-top">
+            <div class="cluster-item-title">${escHtml(group.display_label || group.person_label || 'Unknown')}</div>
+            <div class="phase-status">${isUnknown ? 'unknown' : 'match'}</div>
+          </div>
+          <div class="cluster-item-meta">${escHtml(meta)}</div>
+          <div class="cluster-item-bottom">
+            <span class="cluster-item-meta">${isUnknown ? 'Needs naming' : `${fmtNumber(group.prototype_support_faces || 0)} support faces`}</span>
+          </div>
+        </button>
+      `;
+    }).join('');
+    renderSelectedCluster();
+    return;
+  }
+
   if (!state.clusters.length) {
     container.innerHTML = '<div class="empty-state">No clusters are waiting for review.</div>';
     renderSelectedCluster();
@@ -329,20 +509,169 @@ function renderClusters() {
       </div>
     </button>
   `).join('');
+  renderSelectedCluster();
 }
 
-function renderSelectedCluster() {
-  const cluster = state.clusters.find(item => item.cluster_id === state.selectedClusterId) || null;
-  if (!cluster) {
-    el('cluster-detail-title').textContent = 'Choose a cluster';
-    el('cluster-detail-meta').textContent = '-';
-    el('cluster-label-input').value = '';
-    el('cluster-priority-strip').innerHTML = '';
-    el('cluster-crops').innerHTML = '<div class="empty-state">Select a cluster to review.</div>';
-    setClusterActionDisabled(true);
+function renderSelectionCaption() {
+  const count = state.selectedFaceIds.size;
+  let text = 'No faces selected.';
+  if (isPrototypeMode()) {
+    text = count > 0
+      ? `${count} face(s) selected. Move them into the correct person.`
+      : 'Select face(s) from a matched person bucket and move them into the right person.';
+  } else if (isPersonMode()) {
+    text = count === 1
+      ? 'One face selected. Remove it from the person file to create a new unlabeled cluster.'
+      : count > 1
+        ? 'Select exactly one face to remove from the person file.'
+        : 'Select one face to remove from the person file.';
+  } else {
+    text = count > 0
+      ? `${count} face(s) selected. You can move them into a different person label.`
+      : 'Cluster actions work on the whole cluster. Select specific faces to move only those faces.';
+  }
+  el('review-selection-caption').textContent = text;
+}
+
+function renderReviewControls(cluster) {
+  const busy = isBusy();
+  const selectedCount = state.selectedFaceIds.size;
+  const hasLabeledCluster = !!(cluster && cluster.person_label);
+
+  el('cluster-label-input').disabled = busy || isPrototypeMode() || isPersonMode() || !cluster;
+  el('cluster-label-input').placeholder = isPrototypeMode()
+    ? 'Prototype group mode'
+    : isPersonMode()
+      ? 'Whole file review'
+      : 'Enter a person name';
+
+  el('btn-cluster-approve').disabled = busy || !cluster || isPrototypeMode() || isPersonMode();
+  el('btn-cluster-save-label').disabled = busy || !cluster || isPrototypeMode() || isPersonMode();
+  el('btn-cluster-untag').disabled = busy || !cluster || isPrototypeMode() || isPersonMode();
+  el('btn-cluster-noise').disabled = busy || !cluster || isPrototypeMode() || isPersonMode();
+
+  el('btn-review-whole-file').style.display = isPrototypeMode() ? 'none' : '';
+  el('btn-review-whole-file').disabled = busy || !cluster || (!hasLabeledCluster && !isPersonMode());
+  el('btn-review-whole-file').textContent = isPersonMode() ? 'Back To Cluster' : 'Whole File';
+
+  const destinationField = el('review-destination-input').closest('.field');
+  if (destinationField) {
+    destinationField.style.display = isPersonMode() ? 'none' : '';
+  }
+  el('selection-destination-label').textContent = isPrototypeMode()
+    ? 'Move Selected To Person'
+    : 'Move Selected To Person';
+  el('review-destination-input').disabled = busy;
+  el('btn-review-move-selected').style.display = isPersonMode() ? 'none' : '';
+  el('btn-review-move-selected').disabled = busy || selectedCount === 0 || !el('review-destination-input').value.trim();
+
+  el('btn-review-remove-selected').style.display = isPersonMode() ? '' : 'none';
+  el('btn-review-remove-selected').disabled = busy || selectedCount !== 1;
+
+  renderSelectionCaption();
+}
+
+function reviewFaceScoreLine(face) {
+  if (isPersonMode()) {
+    return `match ${Number(face.match_score || 0).toFixed(2)} | det ${Number(face.detection_score || 0).toFixed(2)}`;
+  }
+  if (isPrototypeMode()) {
+    const who = face.matched_person || face.predicted_label || 'Unknown';
+    return `${who} ${Number(face.similarity || 0).toFixed(2)} | det ${Number(face.detection_score || 0).toFixed(2)}`;
+  }
+  if (face.predicted_label) {
+    return `${face.predicted_label} ${Number(face.best_match_score || 0).toFixed(2)} | det ${Number(face.detection_score || 0).toFixed(2)}`;
+  }
+  return `det ${Number(face.detection_score || 0).toFixed(2)}`;
+}
+
+function renderReviewFaces() {
+  const grid = el('cluster-crops');
+  if (state.reviewFaces === null) {
+    grid.innerHTML = '<div class="empty-state">Loading faces...</div>';
+    return;
+  }
+  if (!state.reviewFaces.length) {
+    grid.innerHTML = '<div class="empty-state">No faces were returned for this review mode.</div>';
     return;
   }
 
+  grid.innerHTML = state.reviewFaces.map(face => `
+    <button class="crop-card selectable ${state.selectedFaceIds.has(face.face_id) ? 'selected' : ''}" data-face-id="${face.face_id}" type="button">
+      <img src="${escHtml(face.crop_url || '')}" alt="${escHtml(face.filename || 'face crop')}" />
+      <div class="crop-indicator">&#10003;</div>
+      <footer>
+        <strong>${escHtml(face.filename || 'Crop')}</strong>
+        <span class="phase-meta">${escHtml(reviewFaceScoreLine(face))}</span>
+      </footer>
+    </button>
+  `).join('');
+}
+
+function renderSelectedCluster() {
+  const cluster = selectedCluster();
+  const personFile = selectedPersonFile();
+  const prototypeGroup = state.prototypeGroups.find(group =>
+    normalizePrototypeLabel(group.person_label) === normalizePrototypeLabel(state.selectedPrototypeLabel)
+  ) || null;
+
+  if (!isPrototypeMode() && !isPersonMode() && !cluster) {
+    el('cluster-detail-title').textContent = 'Choose a cluster';
+    el('cluster-detail-meta').textContent = '-';
+    el('review-detail-eyebrow').textContent = isPrototypeMode() ? 'Selected Person Group' : 'Selected Cluster';
+    el('review-grid-eyebrow').textContent = 'Crops';
+    el('review-grid-title').textContent = isPrototypeMode() ? 'Matched Faces' : 'Cluster Faces';
+    el('cluster-label-input').value = '';
+    el('cluster-priority-strip').innerHTML = '';
+    el('cluster-crops').innerHTML = '<div class="empty-state">Select a cluster to review.</div>';
+    renderReviewControls(null);
+    return;
+  }
+
+  if (isPrototypeMode()) {
+    el('review-detail-eyebrow').textContent = 'Selected Person Group';
+    el('review-grid-eyebrow').textContent = 'Prototype Triage';
+    el('review-grid-title').textContent = 'Matched Faces';
+    el('cluster-detail-title').textContent = prototypeGroup
+      ? (prototypeGroup.display_label || prototypeGroup.person_label || 'Unknown')
+      : 'Choose a person group';
+    el('cluster-detail-meta').textContent = prototypeGroup
+      ? `${fmtNumber(prototypeGroup.face_count || 0)} faces | avg ${Number(prototypeGroup.avg_similarity || 0).toFixed(2)} similarity`
+      : 'Choose a person group';
+    el('cluster-label-input').value = '';
+    el('cluster-priority-strip').innerHTML = `
+      <span class="priority-pill">${Number.isFinite(state.prototypeScopeClusterId) ? `Scoped to cluster ${state.prototypeScopeClusterId}` : 'Global prototype triage'}</span>
+      <span class="priority-pill">${prototypeGroup ? `${fmtNumber(prototypeGroup.prototype_support_faces || 0)} support faces` : 'Select a group'}</span>
+    `;
+    renderReviewControls(cluster);
+    renderReviewFaces();
+    return;
+  }
+
+  if (isPersonMode()) {
+    const personLabel = state.personReviewData?.person_label || personFile?.person_label || cluster?.person_label || 'Choose a person';
+    el('review-detail-eyebrow').textContent = 'Person File';
+    el('review-grid-eyebrow').textContent = 'Person Review';
+    el('review-grid-title').textContent = 'Faces Ranked Worst First';
+    el('cluster-detail-title').textContent = personLabel;
+    el('cluster-detail-meta').textContent = state.personReviewData
+      ? `${fmtNumber(state.personReviewData.face_count || 0)} faces across ${fmtNumber(state.personReviewData.cluster_count || 0)} clusters`
+      : personFile
+        ? `${fmtNumber(personFile.face_count || 0)} faces across ${fmtNumber(personFile.cluster_count || 0)} clusters`
+        : 'Loading person file...';
+    el('cluster-label-input').value = personLabel || '';
+    el('cluster-priority-strip').innerHTML = `
+      <span class="priority-pill">Prototype support ${fmtNumber(state.personReviewData?.prototype_support_faces || 0)}</span>
+      <span class="priority-pill">${state.personReviewData?.usable_label ? 'Usable label' : 'Thin support'}</span>
+    `;
+    renderReviewControls(cluster || { person_label: personLabel });
+    renderReviewFaces();
+    return;
+  }
+
+  el('review-detail-eyebrow').textContent = 'Selected Cluster';
+  el('review-grid-eyebrow').textContent = 'Crops';
+  el('review-grid-title').textContent = 'Cluster Faces';
   el('cluster-detail-title').textContent = clusterDisplayName(cluster);
   el('cluster-detail-meta').textContent = `${fmtNumber(cluster.face_count)} faces | ${cluster.review_state || 'pending'}`;
   el('cluster-label-input').value = cluster.person_label || '';
@@ -351,33 +680,305 @@ function renderSelectedCluster() {
     <span class="priority-pill">Rank ${fmtNumber(cluster.review_priority_rank || 0)}</span>
     <span class="priority-pill">Score ${cluster.review_priority_score ?? '-'}</span>
   `;
-  setClusterActionDisabled(false);
-
-  if (state.clusterCrops === null) {
-    el('cluster-crops').innerHTML = '<div class="empty-state">Loading crops...</div>';
-    return;
-  }
-
-  if (!state.clusterCrops.length) {
-    el('cluster-crops').innerHTML = '<div class="empty-state">No crops were returned for this cluster.</div>';
-    return;
-  }
-
-  el('cluster-crops').innerHTML = state.clusterCrops.map(crop => `
-    <article class="crop-card">
-      <img src="${escHtml(crop.crop_url || '')}" alt="${escHtml(crop.filename || 'cluster crop')}" />
-      <footer>
-        <strong>${escHtml(crop.filename || 'Crop')}</strong>
-        <span class="phase-meta">Score ${(crop.detection_score || 0).toFixed(2)}</span>
-      </footer>
-    </article>
-  `).join('');
+  renderReviewControls(cluster);
+  renderReviewFaces();
 }
 
-function setClusterActionDisabled(disabled) {
-  ['btn-cluster-approve', 'btn-cluster-save-label', 'btn-cluster-untag', 'btn-cluster-noise'].forEach(id => {
-    el(id).disabled = disabled || isBusy();
-  });
+async function setReviewMode(mode) {
+  if (mode === 'prototype') {
+    state.reviewMode = 'prototype';
+    state.prototypeScopeClusterId = derivePrototypeScopeClusterId();
+    state.personReviewData = null;
+    state.selectedPersonLabel = null;
+    state.selectedPersonClusterId = null;
+    clearFaceSelection();
+    await loadPrototypeGroups();
+    return;
+  }
+
+  if (mode === 'people') {
+    const cluster = selectedCluster();
+    state.reviewMode = 'people';
+    state.prototypeScopeClusterId = null;
+    state.selectedPrototypeLabel = null;
+    state.personReviewData = null;
+    if (!state.selectedPersonLabel && cluster && cluster.person_label && !cluster.is_noise) {
+      state.selectedPersonLabel = cluster.person_label;
+      state.selectedPersonClusterId = cluster.cluster_id;
+    }
+    clearFaceSelection();
+    await loadPeopleMode();
+    return;
+  }
+
+  state.reviewMode = 'cluster';
+  state.personReviewData = null;
+  state.prototypeScopeClusterId = null;
+  state.selectedPrototypeLabel = null;
+  state.selectedPersonLabel = null;
+  state.selectedPersonClusterId = null;
+  clearFaceSelection();
+  await loadClusters();
+}
+
+async function toggleWholeFileReview() {
+  const cluster = selectedCluster();
+  if (isPersonMode()) {
+    await setReviewMode('cluster');
+    return;
+  }
+  if (!cluster) {
+    showToast('Pick a cluster first.', 'err');
+    return;
+  }
+  if (!cluster.person_label) {
+    showToast('Whole file review needs a labeled cluster.', 'err');
+    return;
+  }
+
+  clearFaceSelection();
+  state.selectedPersonLabel = cluster.person_label;
+  state.selectedPersonClusterId = cluster.cluster_id;
+  await setReviewMode('people');
+}
+
+async function loadReview() {
+  if (isPrototypeMode()) {
+    await loadPrototypeGroups();
+  } else if (isPersonMode()) {
+    await loadPeopleMode();
+  } else {
+    await loadClusters();
+  }
+}
+
+async function loadClusters() {
+  try {
+    state.clusters = await api('/clusters?sort=review');
+    state.personFiles = buildPersonFiles(state.clusters);
+    if (state.selectedClusterId && !state.clusters.some(item => item.cluster_id === state.selectedClusterId)) {
+      state.selectedClusterId = null;
+    }
+    if (!state.selectedClusterId && state.clusters.length) {
+      state.selectedClusterId = state.clusters[0].cluster_id;
+    }
+    renderClusters();
+    if (state.selectedClusterId) {
+      await loadClusterCrops(state.selectedClusterId);
+    } else {
+      state.reviewFaces = [];
+      renderSelectedCluster();
+    }
+  } catch (error) {
+    el('cluster-list').innerHTML = `<div class="empty-state">${escHtml(error.message)}</div>`;
+    renderSelectedCluster();
+  }
+}
+
+async function loadPeopleMode() {
+  state.reviewFaces = null;
+  state.prototypeGroups = [];
+  state.selectedPrototypeLabel = null;
+  renderReviewModeToggle();
+  renderSelectedCluster();
+
+  try {
+    state.clusters = await api('/clusters?sort=review');
+    state.personFiles = buildPersonFiles(state.clusters);
+
+    if (
+      !state.selectedPersonLabel ||
+      !state.personFiles.some(item => normalizePrototypeLabel(item.person_label) === normalizePrototypeLabel(state.selectedPersonLabel))
+    ) {
+      state.selectedPersonLabel = state.personFiles[0]?.person_label || null;
+      state.selectedPersonClusterId = state.personFiles[0]?.representative_cluster_id || null;
+    } else {
+      state.selectedPersonClusterId = selectedPersonFile()?.representative_cluster_id || state.selectedPersonClusterId;
+    }
+    state.selectedClusterId = Number.isFinite(state.selectedPersonClusterId)
+      ? state.selectedPersonClusterId
+      : state.selectedClusterId;
+
+    renderClusters();
+    if (state.selectedPersonClusterId) {
+      await loadPersonReview(state.selectedPersonClusterId);
+    } else {
+      state.reviewFaces = [];
+      renderSelectedCluster();
+    }
+  } catch (error) {
+    el('cluster-list').innerHTML = `<div class="empty-state">${escHtml(error.message)}</div>`;
+    state.reviewFaces = [];
+    renderSelectedCluster();
+  }
+}
+
+async function loadPrototypeGroups() {
+  state.reviewFaces = null;
+  state.personReviewData = null;
+  renderReviewModeToggle();
+  renderSelectedCluster();
+
+  try {
+    state.clusters = await api('/clusters?sort=review');
+    if (state.selectedClusterId && !state.clusters.some(item => item.cluster_id === state.selectedClusterId)) {
+      state.selectedClusterId = null;
+    }
+    const data = await api(`/clusters/by-person-prototype${activePrototypeScopeQuery()}`);
+    state.prototypeGroups = data.groups || [];
+    if (
+      !state.selectedPrototypeLabel ||
+      !state.prototypeGroups.some(group => normalizePrototypeLabel(group.person_label) === normalizePrototypeLabel(state.selectedPrototypeLabel))
+    ) {
+      state.selectedPrototypeLabel = state.prototypeGroups[0]?.person_label || null;
+    }
+    renderClusters();
+    if (state.selectedPrototypeLabel) {
+      await loadPrototypeFaces(state.selectedPrototypeLabel);
+    } else {
+      state.reviewFaces = [];
+      renderSelectedCluster();
+    }
+  } catch (error) {
+    el('cluster-list').innerHTML = `<div class="empty-state">${escHtml(error.message)}</div>`;
+    state.reviewFaces = [];
+    renderSelectedCluster();
+  }
+}
+
+async function loadClusterCrops(clusterId) {
+  state.reviewFaces = null;
+  state.personReviewData = null;
+  renderSelectedCluster();
+  try {
+    state.reviewFaces = await api(`/clusters/${clusterId}/crops`);
+    renderSelectedCluster();
+  } catch (error) {
+    el('cluster-crops').innerHTML = `<div class="empty-state">${escHtml(error.message)}</div>`;
+  }
+}
+
+async function loadPrototypeFaces(label) {
+  state.reviewFaces = null;
+  renderSelectedCluster();
+  try {
+    state.reviewFaces = await api(`/clusters/by-person-prototype/${encodeURIComponent(label)}\/faces${activePrototypeScopeQuery()}`);
+    renderSelectedCluster();
+  } catch (error) {
+    el('cluster-crops').innerHTML = `<div class="empty-state">${escHtml(error.message)}</div>`;
+  }
+}
+
+async function loadPersonReview(clusterId) {
+  state.reviewFaces = null;
+  state.personReviewData = null;
+  state.selectedClusterId = clusterId;
+  renderSelectedCluster();
+  try {
+    state.personReviewData = await api(`/clusters/${clusterId}/person-review`);
+    state.reviewFaces = state.personReviewData.faces || [];
+    renderSelectedCluster();
+  } catch (error) {
+    el('cluster-crops').innerHTML = `<div class="empty-state">${escHtml(error.message)}</div>`;
+  }
+}
+
+function toggleFaceSelection(faceId) {
+  if (state.selectedFaceIds.has(faceId)) {
+    state.selectedFaceIds.delete(faceId);
+  } else {
+    if (isPersonMode()) {
+      state.selectedFaceIds.clear();
+    }
+    state.selectedFaceIds.add(faceId);
+  }
+  renderSelectedCluster();
+}
+
+async function moveSelectedFaces() {
+  const targetPersonLabel = el('review-destination-input').value.trim();
+  if (!targetPersonLabel) {
+    showToast('Enter a destination person label.', 'err');
+    return;
+  }
+
+  const selectedFaces = currentReviewSelection();
+  if (!selectedFaces.length) {
+    showToast('Select one or more faces first.', 'err');
+    return;
+  }
+
+  try {
+    if (isPrototypeMode()) {
+      const grouped = new Map();
+      selectedFaces.forEach(face => {
+        const clusterId = Number(face.cluster_id);
+        if (!Number.isFinite(clusterId)) {
+          return;
+        }
+        if (!grouped.has(clusterId)) {
+          grouped.set(clusterId, []);
+        }
+        grouped.get(clusterId).push(face.face_id);
+      });
+
+      for (const [clusterId, faceIds] of grouped.entries()) {
+        await apiPost('/clusters/reassign-faces', {
+          source_cluster_id: clusterId,
+          face_ids: faceIds,
+          target_person_label: targetPersonLabel,
+        });
+      }
+      showToast(`Moved ${selectedFaces.length} face(s) to ${targetPersonLabel}.`, 'ok');
+      clearFaceSelection();
+      el('review-destination-input').value = '';
+      await loadPrototypeGroups();
+      await refreshStatus();
+      return;
+    }
+
+    const cluster = selectedCluster();
+    if (!cluster) {
+      showToast('Pick a cluster first.', 'err');
+      return;
+    }
+
+    await apiPost('/clusters/reassign-faces', {
+      source_cluster_id: cluster.cluster_id,
+      face_ids: selectedFaces.map(face => face.face_id),
+      target_person_label: targetPersonLabel,
+    });
+    showToast(`Moved ${selectedFaces.length} face(s) to ${targetPersonLabel}.`, 'ok');
+    clearFaceSelection();
+    el('review-destination-input').value = '';
+    await loadClusters();
+    await refreshStatus();
+  } catch (error) {
+    showToast(error.message, 'err');
+  }
+}
+
+async function removeSelectedPersonFace() {
+  if (!isPersonMode()) {
+    return;
+  }
+  const selected = Array.from(state.selectedFaceIds);
+  if (selected.length !== 1) {
+    showToast('Select exactly one face to remove.', 'err');
+    return;
+  }
+
+  try {
+    await apiPost(`/clusters/${state.selectedClusterId}/person-review/remove-face`, {
+      face_ids: selected,
+    });
+    showToast('Removed face from the person file.', 'ok');
+    clearFaceSelection();
+    await loadPersonReview(state.selectedClusterId);
+    await refreshStatus();
+  } catch (error) {
+    showToast(error.message, 'err');
+  }
 }
 
 function renderPhotoFilters(filters) {
@@ -517,7 +1118,7 @@ async function refreshStatus() {
     renderScope();
 
     if (state.activeTab === 'review') {
-      setClusterActionDisabled(!state.selectedClusterId);
+      renderSelectedCluster();
     }
   } catch (error) {
     showToast(`Status refresh failed: ${error.message}`, 'err');
@@ -562,38 +1163,6 @@ async function stopPipeline() {
     await refreshStatus();
   } catch (error) {
     showToast(error.message, 'err');
-  }
-}
-
-async function loadClusters() {
-  try {
-    state.clusters = await api('/clusters?sort=review');
-    if (state.selectedClusterId && !state.clusters.some(item => item.cluster_id === state.selectedClusterId)) {
-      state.selectedClusterId = null;
-    }
-    if (!state.selectedClusterId && state.clusters.length) {
-      state.selectedClusterId = state.clusters[0].cluster_id;
-    }
-    renderClusters();
-    if (state.selectedClusterId) {
-      await loadClusterCrops(state.selectedClusterId);
-    } else {
-      renderSelectedCluster();
-    }
-  } catch (error) {
-    el('cluster-list').innerHTML = `<div class="empty-state">${escHtml(error.message)}</div>`;
-    renderSelectedCluster();
-  }
-}
-
-async function loadClusterCrops(clusterId) {
-  state.clusterCrops = null;
-  renderSelectedCluster();
-  try {
-    state.clusterCrops = await api(`/clusters/${clusterId}/crops`);
-    renderSelectedCluster();
-  } catch (error) {
-    el('cluster-crops').innerHTML = `<div class="empty-state">${escHtml(error.message)}</div>`;
   }
 }
 
@@ -788,10 +1357,17 @@ async function clearDatabase() {
     const result = await apiPost('/settings/clear-db', {});
     showToast(result.note || 'Database cleared.', 'ok');
     state.selectedClusterId = null;
-    state.clusterCrops = [];
+    state.selectedPersonLabel = null;
+    state.selectedPersonClusterId = null;
+    state.reviewFaces = [];
+    state.personFiles = [];
+    state.prototypeGroups = [];
+    state.selectedPrototypeLabel = null;
+    state.personReviewData = null;
+    clearFaceSelection();
     await Promise.all([refreshStatus(), loadSettings()]);
     if (state.activeTab === 'review') {
-      await loadClusters();
+      await loadReview();
     }
     if (state.activeTab === 'library') {
       await loadPhotos(1);
@@ -840,20 +1416,55 @@ function bindEvents() {
     });
   });
 
-  el('btn-refresh-clusters').addEventListener('click', () => loadClusters());
+  el('btn-refresh-clusters').addEventListener('click', () => loadReview());
+  el('btn-review-mode-cluster').addEventListener('click', () => setReviewMode('cluster'));
+  el('btn-review-mode-person').addEventListener('click', () => setReviewMode('people'));
+  el('btn-review-mode-prototype').addEventListener('click', () => setReviewMode('prototype'));
   el('cluster-list').addEventListener('click', event => {
-    const button = event.target.closest('[data-cluster-id]');
-    if (!button) {
+    const clusterButton = event.target.closest('[data-cluster-id]');
+    const personButton = event.target.closest('[data-person-label]');
+    const prototypeButton = event.target.closest('[data-prototype-label]');
+    if (!clusterButton && !personButton && !prototypeButton) {
       return;
     }
-    state.selectedClusterId = Number(button.dataset.clusterId);
+    clearFaceSelection();
+    if (clusterButton) {
+      state.selectedClusterId = Number(clusterButton.dataset.clusterId);
+      renderClusters();
+      if (isPersonMode()) {
+        loadPersonReview(state.selectedClusterId);
+      } else {
+        loadClusterCrops(state.selectedClusterId);
+      }
+      return;
+    }
+    if (personButton) {
+      state.selectedPersonLabel = personButton.dataset.personLabel;
+      state.selectedPersonClusterId = Number(personButton.dataset.personClusterId);
+      state.selectedClusterId = state.selectedPersonClusterId;
+      renderClusters();
+      loadPersonReview(state.selectedPersonClusterId);
+      return;
+    }
+    state.selectedPrototypeLabel = prototypeButton.dataset.prototypeLabel;
     renderClusters();
-    loadClusterCrops(state.selectedClusterId);
+    loadPrototypeFaces(state.selectedPrototypeLabel);
   });
   el('btn-cluster-save-label').addEventListener('click', () => saveClusterLabel());
   el('btn-cluster-approve').addEventListener('click', () => approveCluster());
   el('btn-cluster-untag').addEventListener('click', () => untagCluster());
   el('btn-cluster-noise').addEventListener('click', () => markClusterNoise());
+  el('btn-review-whole-file').addEventListener('click', () => toggleWholeFileReview());
+  el('btn-review-move-selected').addEventListener('click', () => moveSelectedFaces());
+  el('btn-review-remove-selected').addEventListener('click', () => removeSelectedPersonFace());
+  el('review-destination-input').addEventListener('input', () => renderSelectedCluster());
+  el('cluster-crops').addEventListener('click', event => {
+    const card = event.target.closest('[data-face-id]');
+    if (!card) {
+      return;
+    }
+    toggleFaceSelection(Number(card.dataset.faceId));
+  });
 
   el('btn-apply-library-filters').addEventListener('click', () => loadPhotos(1));
   el('btn-reset-library-filters').addEventListener('click', () => {

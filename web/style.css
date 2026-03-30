@@ -495,6 +495,30 @@ h3 {
   gap: 18px;
 }
 
+.review-sidebar-toolbar {
+  display: grid;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.mode-toggle {
+  display: inline-flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.mode-toggle .btn.active {
+  background: linear-gradient(135deg, rgba(36, 93, 99, 0.18), rgba(36, 93, 99, 0.08));
+  border-color: rgba(36, 93, 99, 0.24);
+  color: var(--accent);
+}
+
+.sidebar-caption {
+  color: var(--ink-soft);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
 .cluster-list {
   max-height: calc(100vh - 240px);
   overflow: auto;
@@ -537,6 +561,10 @@ h3 {
 .detail-grid {
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: end;
+}
+
+.detail-grid--secondary {
+  margin-top: 14px;
 }
 
 .field {
@@ -613,6 +641,24 @@ h3 {
   background: rgba(255, 255, 255, 0.65);
 }
 
+.crop-card {
+  position: relative;
+  padding: 0;
+  cursor: pointer;
+  text-align: left;
+}
+
+.crop-card.selectable:hover {
+  border-color: rgba(36, 93, 99, 0.24);
+  background: rgba(36, 93, 99, 0.05);
+}
+
+.crop-card.selected {
+  border-color: rgba(36, 93, 99, 0.34);
+  box-shadow: 0 0 0 2px rgba(36, 93, 99, 0.14);
+  background: rgba(36, 93, 99, 0.08);
+}
+
 .crop-card img,
 .photo-card img {
   display: block;
@@ -628,6 +674,27 @@ h3 {
   display: grid;
   gap: 4px;
   font-size: 12px;
+}
+
+.crop-indicator {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  display: grid;
+  place-items: center;
+  background: rgba(31, 42, 45, 0.68);
+  color: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.44);
+  font-size: 13px;
+}
+
+.crop-card.selected .crop-indicator {
+  background: var(--accent);
+  border-color: rgba(36, 93, 99, 0.4);
+  color: #fffaf2;
 }
 
 .crop-card strong,
