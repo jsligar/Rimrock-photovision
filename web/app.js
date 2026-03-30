@@ -34,6 +34,12 @@ const state = {
   prototypeScopeClusterId: null,
   personReviewData: null,
   selectedFaceIds: new Set(),
+  reviewSidebarCollapsed: {
+    people: false,
+    clusters: false,
+    noise: false,
+    prototype: false,
+  },
   photoFiltersLoaded: false,
   settingsLoaded: false,
   photos: [],
@@ -409,65 +415,66 @@ function currentReviewSelection() {
   return (state.reviewFaces || []).filter(face => state.selectedFaceIds.has(face.face_id));
 }
 
+function queueClusters() {
+  return state.clusters.filter(cluster => !cluster.person_label && !cluster.is_noise);
+}
+
+function noiseClusters() {
+  return state.clusters.filter(cluster => cluster.is_noise);
+}
+
+function firstQueueClusterId() {
+  return queueClusters()[0]?.cluster_id || noiseClusters()[0]?.cluster_id || null;
+}
+
+function isReviewSectionCollapsed(sectionKey) {
+  return Boolean(state.reviewSidebarCollapsed[sectionKey]);
+}
+
+function toggleReviewSection(sectionKey) {
+  state.reviewSidebarCollapsed[sectionKey] = !state.reviewSidebarCollapsed[sectionKey];
+  renderClusters();
+}
+
+function renderReviewSection(sectionKey, title, count, content, emptyText) {
+  const collapsed = isReviewSectionCollapsed(sectionKey);
+  return `
+    <section class="review-section ${collapsed ? 'collapsed' : ''}">
+      <button class="review-section-toggle" data-toggle-review-section="${sectionKey}" type="button">
+        <span class="review-section-toggle-icon">${collapsed ? '+' : '-'}</span>
+        <span class="review-section-title-row">
+          <strong>${escHtml(title)}</strong>
+          <span class="review-section-count">${fmtNumber(count)}</span>
+        </span>
+      </button>
+      <div class="review-section-body">
+        <div class="review-section-list">
+          ${content || `<div class="empty-state empty-state--compact">${escHtml(emptyText)}</div>`}
+        </div>
+      </div>
+    </section>
+  `;
+}
+
 function renderReviewModeToggle() {
-  el('btn-review-mode-cluster').classList.toggle('active', state.reviewMode === 'cluster');
-  el('btn-review-mode-person').classList.toggle('active', isPersonMode());
+  el('btn-review-mode-cluster').classList.toggle('active', !isPrototypeMode());
   el('btn-review-mode-prototype').classList.toggle('active', isPrototypeMode());
-  el('review-sidebar-title').textContent = isPrototypeMode()
-    ? 'Prototype Groups'
-    : isPersonMode()
-      ? 'Person Files'
-      : 'Clusters';
+  el('review-sidebar-title').textContent = isPrototypeMode() ? 'Prototype Triage' : 'Review Queue';
   el('review-sidebar-caption').textContent = isPrototypeMode()
     ? (
       Number.isFinite(state.prototypeScopeClusterId)
         ? `Prototype triage is scoped to cluster ${state.prototypeScopeClusterId}.`
         : 'Prototype triage groups unknown faces by the closest known person.'
     )
-    : (isPersonMode()
-      ? 'Open a person file to inspect and clean up mismatched faces across clusters.'
-      : 'Cluster-by-cluster review queue.');
+    : 'People folders, pending clusters, and noise each keep their own scroll area.';
 }
 
 function renderClusters() {
   const container = el('cluster-list');
   renderReviewModeToggle();
 
-  if (isPersonMode()) {
-    if (!state.personFiles.length) {
-      container.innerHTML = '<div class="empty-state">No labeled person files are available yet.</div>';
-      renderSelectedCluster();
-      return;
-    }
-
-    container.innerHTML = state.personFiles.map(person => {
-      const active = normalizePrototypeLabel(state.selectedPersonLabel) === normalizePrototypeLabel(person.person_label);
-      return `
-        <button class="cluster-item ${active ? 'active' : ''}" data-person-label="${escHtml(person.person_label)}" data-person-cluster-id="${person.representative_cluster_id}" type="button">
-          <div class="cluster-item-top">
-            <div class="cluster-item-title">${escHtml(person.person_label)}</div>
-            <div class="phase-status">${person.approved_cluster_count > 0 ? 'approved' : 'review'}</div>
-          </div>
-          <div class="cluster-item-meta">Faces ${fmtNumber(person.face_count)} | Clusters ${fmtNumber(person.cluster_count)}</div>
-          <div class="cluster-item-bottom">
-            <span class="cluster-item-meta">Photos ${fmtNumber(person.photo_count)}</span>
-            <span class="cluster-item-meta">Rep cluster ${fmtNumber(person.representative_cluster_id)}</span>
-          </div>
-        </button>
-      `;
-    }).join('');
-    renderSelectedCluster();
-    return;
-  }
-
   if (isPrototypeMode()) {
-    if (!state.prototypeGroups.length) {
-      container.innerHTML = '<div class="empty-state">No faces are waiting in prototype triage.</div>';
-      renderSelectedCluster();
-      return;
-    }
-
-    container.innerHTML = state.prototypeGroups.map(group => {
+    const prototypeMarkup = state.prototypeGroups.map(group => {
       const active = normalizePrototypeLabel(state.selectedPrototypeLabel) === normalizePrototypeLabel(group.person_label);
       const isUnknown = normalizePrototypeLabel(group.person_label) === '__unknown__';
       const meta = isUnknown
@@ -486,18 +493,36 @@ function renderClusters() {
         </button>
       `;
     }).join('');
+    container.innerHTML = renderReviewSection(
+      'prototype',
+      'Prototype Groups',
+      state.prototypeGroups.length,
+      prototypeMarkup,
+      'No faces are waiting in prototype triage.'
+    );
     renderSelectedCluster();
     return;
   }
 
-  if (!state.clusters.length) {
-    container.innerHTML = '<div class="empty-state">No clusters are waiting for review.</div>';
-    renderSelectedCluster();
-    return;
-  }
+  const peopleMarkup = state.personFiles.map(person => {
+    const active = isPersonMode() && normalizePrototypeLabel(state.selectedPersonLabel) === normalizePrototypeLabel(person.person_label);
+    return `
+      <button class="cluster-item ${active ? 'active' : ''}" data-person-label="${escHtml(person.person_label)}" data-person-cluster-id="${person.representative_cluster_id}" type="button">
+        <div class="cluster-item-top">
+          <div class="cluster-item-title">${escHtml(person.person_label)}</div>
+          <div class="phase-status">${person.approved_cluster_count > 0 ? 'approved' : 'review'}</div>
+        </div>
+        <div class="cluster-item-meta">Faces ${fmtNumber(person.face_count)} | Clusters ${fmtNumber(person.cluster_count)}</div>
+        <div class="cluster-item-bottom">
+          <span class="cluster-item-meta">Photos ${fmtNumber(person.photo_count)}</span>
+          <span class="cluster-item-meta">Rep cluster ${fmtNumber(person.representative_cluster_id)}</span>
+        </div>
+      </button>
+    `;
+  }).join('');
 
-  container.innerHTML = state.clusters.map(cluster => `
-    <button class="cluster-item ${state.selectedClusterId === cluster.cluster_id ? 'active' : ''}" data-cluster-id="${cluster.cluster_id}" type="button">
+  const clusterMarkup = queueClusters().map(cluster => `
+    <button class="cluster-item ${!isPersonMode() && state.selectedClusterId === cluster.cluster_id ? 'active' : ''}" data-cluster-id="${cluster.cluster_id}" type="button">
       <div class="cluster-item-top">
         <div class="cluster-item-title">${escHtml(clusterDisplayName(cluster))}</div>
         <div class="phase-status">${escHtml(cluster.review_state || 'pending')}</div>
@@ -509,6 +534,26 @@ function renderClusters() {
       </div>
     </button>
   `).join('');
+
+  const noiseMarkup = noiseClusters().map(cluster => `
+    <button class="cluster-item ${!isPersonMode() && state.selectedClusterId === cluster.cluster_id ? 'active' : ''}" data-cluster-id="${cluster.cluster_id}" type="button">
+      <div class="cluster-item-top">
+        <div class="cluster-item-title">${escHtml(clusterDisplayName(cluster))}</div>
+        <div class="phase-status">noise</div>
+      </div>
+      <div class="cluster-item-meta">Faces ${fmtNumber(cluster.face_count)} | Photos ${fmtNumber(cluster.photo_count || 0)}</div>
+      <div class="cluster-item-bottom">
+        <span class="cluster-item-meta">Noise cluster</span>
+        <span class="cluster-item-meta">Rank ${fmtNumber(cluster.review_priority_rank || 0)}</span>
+      </div>
+    </button>
+  `).join('');
+
+  container.innerHTML = [
+    renderReviewSection('people', 'People Folders', state.personFiles.length, peopleMarkup, 'No labeled person folders yet.'),
+    renderReviewSection('clusters', 'Clusters', queueClusters().length, clusterMarkup, 'No pending clusters right now.'),
+    renderReviewSection('noise', 'Noise', noiseClusters().length, noiseMarkup, 'No noise buckets yet.'),
+  ].join('');
   renderSelectedCluster();
 }
 
@@ -550,7 +595,7 @@ function renderReviewControls(cluster) {
 
   el('btn-review-whole-file').style.display = isPrototypeMode() ? 'none' : '';
   el('btn-review-whole-file').disabled = busy || !cluster || (!hasLabeledCluster && !isPersonMode());
-  el('btn-review-whole-file').textContent = isPersonMode() ? 'Back To Cluster' : 'Whole File';
+  el('btn-review-whole-file').textContent = isPersonMode() ? 'Back To Queues' : 'Whole File';
 
   const destinationField = el('review-destination-input').closest('.field');
   if (destinationField) {
@@ -715,8 +760,15 @@ async function setReviewMode(mode) {
   state.selectedPrototypeLabel = null;
   state.selectedPersonLabel = null;
   state.selectedPersonClusterId = null;
+  if (!selectedCluster() || (selectedCluster()?.person_label && !selectedCluster()?.is_noise)) {
+    state.selectedClusterId = firstQueueClusterId();
+  }
   clearFaceSelection();
   await loadClusters();
+}
+
+async function showReviewQueues() {
+  await setReviewMode('cluster');
 }
 
 async function toggleWholeFileReview() {
@@ -756,6 +808,17 @@ async function loadClusters() {
     state.personFiles = buildPersonFiles(state.clusters);
     if (state.selectedClusterId && !state.clusters.some(item => item.cluster_id === state.selectedClusterId)) {
       state.selectedClusterId = null;
+    }
+    if (!state.selectedClusterId && state.clusters.length) {
+      state.selectedClusterId = firstQueueClusterId();
+    }
+    if (!state.selectedClusterId && state.personFiles.length) {
+      state.reviewMode = 'people';
+      state.selectedPersonLabel = state.selectedPersonLabel || state.personFiles[0].person_label;
+      state.selectedPersonClusterId = selectedPersonFile()?.representative_cluster_id || state.personFiles[0].representative_cluster_id;
+      renderClusters();
+      await loadPersonReview(state.selectedPersonClusterId);
+      return;
     }
     if (!state.selectedClusterId && state.clusters.length) {
       state.selectedClusterId = state.clusters[0].cluster_id;
@@ -1429,10 +1492,14 @@ function bindEvents() {
   });
 
   el('btn-refresh-clusters').addEventListener('click', () => loadReview());
-  el('btn-review-mode-cluster').addEventListener('click', () => setReviewMode('cluster'));
-  el('btn-review-mode-person').addEventListener('click', () => setReviewMode('people'));
+  el('btn-review-mode-cluster').addEventListener('click', () => showReviewQueues());
   el('btn-review-mode-prototype').addEventListener('click', () => setReviewMode('prototype'));
   el('cluster-list').addEventListener('click', event => {
+    const sectionToggle = event.target.closest('[data-toggle-review-section]');
+    if (sectionToggle) {
+      toggleReviewSection(sectionToggle.dataset.toggleReviewSection);
+      return;
+    }
     const clusterButton = event.target.closest('[data-cluster-id]');
     const personButton = event.target.closest('[data-person-label]');
     const prototypeButton = event.target.closest('[data-prototype-label]');
@@ -1441,16 +1508,17 @@ function bindEvents() {
     }
     clearFaceSelection();
     if (clusterButton) {
+      state.reviewMode = 'cluster';
       state.selectedClusterId = Number(clusterButton.dataset.clusterId);
+      state.selectedPersonLabel = null;
+      state.selectedPersonClusterId = null;
+      state.personReviewData = null;
       renderClusters();
-      if (isPersonMode()) {
-        loadPersonReview(state.selectedClusterId);
-      } else {
-        loadClusterCrops(state.selectedClusterId);
-      }
+      loadClusterCrops(state.selectedClusterId);
       return;
     }
     if (personButton) {
+      state.reviewMode = 'people';
       state.selectedPersonLabel = personButton.dataset.personLabel;
       state.selectedPersonClusterId = Number(personButton.dataset.personClusterId);
       state.selectedClusterId = state.selectedPersonClusterId;
