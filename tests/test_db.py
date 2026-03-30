@@ -93,3 +93,28 @@ def test_init_db_idempotent(tmp_db):
     count = c.execute("SELECT COUNT(*) FROM pipeline_state").fetchone()[0]
     c.close()
     assert count == 8
+
+
+def test_reset_phase_state_clears_completion_metadata(tmp_db):
+    db.mark_phase_running("tag")
+    db.update_phase_progress("tag", 42, 100)
+    db.mark_phase_complete("tag")
+
+    db.reset_phase_state(["tag"])
+
+    c = db.get_db()
+    row = c.execute(
+        """
+        SELECT status, progress_current, progress_total, started_at, completed_at, error_message
+        FROM pipeline_state
+        WHERE phase='tag'
+        """
+    ).fetchone()
+    c.close()
+
+    assert row["status"] == "pending"
+    assert row["progress_current"] == 0
+    assert row["progress_total"] == 0
+    assert row["started_at"] is None
+    assert row["completed_at"] is None
+    assert row["error_message"] is None

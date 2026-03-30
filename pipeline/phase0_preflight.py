@@ -1,9 +1,11 @@
-"""Phase 0 — Preflight: verify all prerequisites before starting the pipeline."""
+"""Phase 0 - Preflight: verify all prerequisites before starting the pipeline."""
 
+import importlib
+import os
 import shutil
 import subprocess
 import sys
-import importlib
+import time
 from pathlib import Path
 
 # Allow running from project root
@@ -11,16 +13,21 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import config
 import db
+from clip_compat import ensure_pkg_resources_packaging
+from pipeline.logger import get_logger
+from pipeline.postmortem import emit_phase_postmortem
+
+log = get_logger("phase0_preflight")
 
 
 REQUIRED_PACKAGES = [
-    "insightface",
-    "ultralytics",
-    "clip",
-    "umap",
-    "hdbscan",
-    "cv2",
-    "PIL",
+    ("insightface", None),
+    ("ultralytics", None),
+    ("clip", ensure_pkg_resources_packaging),
+    ("umap", None),
+    ("hdbscan", None),
+    ("cv2", None),
+    ("PIL", None),
 ]
 
 
@@ -32,31 +39,66 @@ def check_nvme_space() -> tuple[bool, str]:
     usage = shutil.disk_usage(str(config.LOCAL_BASE.parent))
     free = usage.free
     if free < config.MIN_FREE_BYTES:
-        return False, (
-            f"Insufficient NVMe space. Need 50GB free, have {_gb(free):.1f}GB"
-        )
+        return False, f"Insufficient NVMe space. Need 50GB free, have {_gb(free):.1f}GB"
     return True, f"NVMe free: {_gb(free):.1f} GB"
+
+
+def _ollama_stop_hint(pgrep_output: str) -> str:
+    override = os.getenv("PREFLIGHT_OLLAMA_STOP_HINT", "").strip()
+    if override:
+        return override
+
+    first_pid = pgrep_output.splitlines()[0].strip() if pgrep_output else ""
+    if first_pid:
+        try:
+            ppid_result = subprocess.run(
+                ["ps", "-o", "ppid=", "-p", first_pid],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            ppid = ppid_result.stdout.strip()
+            if ppid:
+                parent_cmd = subprocess.run(
+                    ["ps", "-o", "cmd=", "-p", ppid],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                ).stdout.lower()
+                if "containerd-shim" in parent_cmd or "docker" in parent_cmd:
+                    return "docker stop ollama"
+        except Exception:
+            pass
+
+    return "sudo systemctl stop ollama or docker stop ollama"
 
 
 def check_ollama_not_running() -> tuple[bool, str]:
     try:
         result = subprocess.run(
             ["pgrep", "-x", "ollama"],
-            capture_output=True, text=True, timeout=5
+            capture_output=True,
+            text=True,
+            timeout=5,
         )
         if result.returncode == 0 and result.stdout.strip():
-            return False, (
+            stop_hint = _ollama_stop_hint(result.stdout)
+            return (
+                False,
                 "Ollama is running and will consume ~2GB RAM. "
-                "Stop it first: sudo systemctl stop ollama"
+                f"Stop it first: {stop_hint}",
             )
     except FileNotFoundError:
-        pass  # pgrep not available — skip check
+        pass  # pgrep not available - skip check
     return True, "Ollama running: NO"
 
 
 def check_nas_mount() -> tuple[bool, str]:
     if not config.NAS_SOURCE_DIR.exists():
-        return False, f"NAS not mounted at {config.NAS_SOURCE_DIR}. Mount it before running preflight."
+        return (
+            False,
+            f"NAS not mounted at {config.NAS_SOURCE_DIR}. Mount it before running preflight.",
+        )
     try:
         list(config.NAS_SOURCE_DIR.iterdir())
     except PermissionError:
@@ -88,14 +130,28 @@ def check_db() -> tuple[bool, str]:
 def check_exiftool() -> tuple[bool, str]:
     try:
         result = subprocess.run(
-            ["exiftool", "-ver"],
-            capture_output=True, text=True, timeout=10
+            ["exiftool", "-ver"], capture_output=True, text=True, timeout=10
         )
         if result.returncode != 0:
             return False, "exiftool check failed"
         return True, f"exiftool version: {result.stdout.strip()}"
     except FileNotFoundError:
-        return False, "exiftool is not installed. Install it: sudo apt install libimage-exiftool-perl"
+        return (
+            False,
+            "exiftool is not installed. Install it: sudo apt install libimage-exiftool-perl",
+        )
+
+
+def _probe_dir_writable(path: Path) -> bool:
+    """Return True if *path* exists and is writable (touch + unlink probe)."""
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        probe = path / ".write_probe"
+        probe.touch()
+        probe.unlink()
+        return True
+    except Exception:
+        return False
 
 
 def check_insightface_model() -> tuple[bool, str]:
@@ -108,14 +164,39 @@ def check_insightface_model() -> tuple[bool, str]:
     ]
     for p in cache_paths:
         if p.exists():
-            return True, f"Models cached: YES ({p})"
-    return True, "Models cached: NO (will download on first run)"
+            return True, f"InsightFace model cached: YES ({p})"
+    return True, "InsightFace model cached: NO (will download on first run)"
+
+
+def check_clip_model() -> tuple[bool, str]:
+    """Verify CLIP model weights are cached (avoids a download mid-pipeline)."""
+    model_name = config.CLIP_MODEL
+    # CLIP caches under torch hub or ~/.cache/clip — check both
+    cache_dirs = [
+        Path.home() / ".cache" / "clip",
+        Path.home() / ".cache" / "torch" / "hub" / "checkpoints",
+    ]
+    # Derive expected filename: e.g. "ViT-B/32" → "ViT-B-32.pt"
+    safe_name = model_name.replace("/", "-")
+    for cache_dir in cache_dirs:
+        candidate = cache_dir / f"{safe_name}.pt"
+        if candidate.exists():
+            return True, f"CLIP model cached: YES ({candidate})"
+    return True, f"CLIP model cached: NO — '{model_name}' will download on first use"
+
+
+def check_output_dir_writable() -> tuple[bool, str]:
+    if _probe_dir_writable(config.OUTPUT_DIR):
+        return True, f"OUTPUT_DIR writable: YES ({config.OUTPUT_DIR})"
+    return False, f"OUTPUT_DIR is not writable: {config.OUTPUT_DIR}"
 
 
 def check_python_packages() -> tuple[bool, str]:
     missing = []
-    for pkg in REQUIRED_PACKAGES:
+    for pkg, prepare_import in REQUIRED_PACKAGES:
         try:
+            if prepare_import:
+                prepare_import()
             importlib.import_module(pkg)
         except ImportError:
             missing.append(pkg)
@@ -125,21 +206,24 @@ def check_python_packages() -> tuple[bool, str]:
 
 
 def run_preflight() -> bool:
+    phase_start = time.time()
     print("=" * 60)
-    print("RIMROCK PHOTO TAGGER — PREFLIGHT CHECK")
+    print("RIMROCK PHOTO TAGGER - PREFLIGHT CHECK")
     print("=" * 60)
 
     db.mark_phase_running("preflight")
 
     checks = [
-        ("NVMe Space",       check_nvme_space),
+        ("NVMe Space", check_nvme_space),
         ("Ollama Not Running", check_ollama_not_running),
-        ("NAS Mount",        check_nas_mount),
-        ("Directories",      check_directories),
-        ("Database",         check_db),
-        ("exiftool",         check_exiftool),
+        ("NAS Mount", check_nas_mount),
+        ("Directories", check_directories),
+        ("Output Dir Writable", check_output_dir_writable),
+        ("Database", check_db),
+        ("exiftool", check_exiftool),
         ("InsightFace Model", check_insightface_model),
-        ("Python Packages",  check_python_packages),
+        ("CLIP Model", check_clip_model),
+        ("Python Packages", check_python_packages),
     ]
 
     all_passed = True
@@ -160,19 +244,47 @@ def run_preflight() -> bool:
         free_gb = _gb(usage.free)
         nas_ok = results["NAS Mount"][0]
         ollama_ok = results["Ollama Not Running"][0]
-        model_msg = results["InsightFace Model"][1]
-        models_cached = "YES" if "YES" in model_msg else "NO (will download on first run)"
+        insightface_msg = results["InsightFace Model"][1]
+        insightface_cached = "YES" if "YES" in insightface_msg else "NO (will download)"
+        clip_msg = results["CLIP Model"][1]
+        clip_cached = "YES" if "YES" in clip_msg else "NO (will download)"
 
         print("PREFLIGHT PASSED")
-        print(f"  NVMe free:       {free_gb:.1f} GB")
-        print(f"  NAS reachable:   {'YES' if nas_ok else 'NO'}")
-        print(f"  Ollama running:  {'NO' if ollama_ok else 'YES'}")
-        print(f"  Models cached:   {models_cached}")
-        print(f"  DB initialized:  YES")
+        print(f"  NVMe free:            {free_gb:.1f} GB")
+        print(f"  NAS reachable:        {'YES' if nas_ok else 'NO'}")
+        print(f"  Ollama running:       {'NO' if ollama_ok else 'YES'}")
+        print(f"  InsightFace cached:   {insightface_cached}")
+        print(f"  CLIP cached:          {clip_cached}")
+        print("  DB initialized:       YES")
         db.mark_phase_complete("preflight")
+        emit_phase_postmortem(
+            log,
+            "preflight",
+            phase_start,
+            True,
+            metrics={
+                "NVMe free (GB)": f"{free_gb:.1f}",
+                "NAS reachable": "YES" if nas_ok else "NO",
+                "Ollama running": "NO" if ollama_ok else "YES",
+                "InsightFace cached": insightface_cached,
+                "CLIP cached": clip_cached,
+            },
+        )
     else:
-        print("PREFLIGHT FAILED — resolve the above errors before continuing.")
-        db.mark_phase_error("preflight", "One or more preflight checks failed")
+        print("PREFLIGHT FAILED - resolve the above errors before continuing.")
+        failed_checks = [name for name, (passed, _) in results.items() if not passed]
+        fail_summary = "One or more preflight checks failed"
+        if failed_checks:
+            fail_summary = f"Failed checks: {', '.join(failed_checks)}"
+        db.mark_phase_error("preflight", fail_summary)
+        emit_phase_postmortem(
+            log,
+            "preflight",
+            phase_start,
+            False,
+            metrics={"Failed checks": ", ".join(failed_checks) if failed_checks else "unknown"},
+            error=fail_summary,
+        )
 
     return all_passed
 

@@ -17,8 +17,8 @@ def client_with_photos(tmp_db):
     import db
     c = db.get_db()
     photos = [
-        ("img/2020-01-01.jpg", "2020-01-01.jpg", "2020-01-01T12:00:00+00:00", "exif_original", "organized/2020/2020-01/2020-01-01.jpg"),
-        ("img/2021-06-15.jpg", "2021-06-15.jpg", "2021-06-15T08:00:00+00:00", "exif_original", "organized/2021/2021-06/2021-06-15.jpg"),
+        ("img/2020-01-01.jpg", "2020-01-01.jpg", "2020-01-01T12:00:00+00:00", "exif_original", "2020/2020-01/2020-01-01.jpg"),
+        ("img/2021-06-15.jpg", "2021-06-15.jpg", "2021-06-15T08:00:00+00:00", "exif_original", "2021/2021-06/2021-06-15.jpg"),
         ("img/undated.jpg",    "undated.jpg",    None,                         None,            "undated/undated.jpg"),
         ("img/no_dest.jpg",    "no_dest.jpg",    None,                         None,            None),  # unprocessed, no dest
     ]
@@ -120,6 +120,142 @@ def test_get_photo_by_id(client_with_photos):
     assert "preview_url" in data
 
 
+def test_get_photo_excludes_clip_embedding_blob(client_with_photos):
+    import db
+    import numpy as np
+
+    conn = db.get_db()
+    photo_id = conn.execute("SELECT photo_id FROM photos WHERE filename='2020-01-01.jpg'").fetchone()[0]
+    conn.execute(
+        "UPDATE photos SET clip_embedding=? WHERE photo_id=?",
+        (np.arange(4, dtype=np.float32).tobytes(), photo_id),
+    )
+    conn.commit()
+    conn.close()
+
+    detail = client_with_photos.get(f"/api/photos/{photo_id}")
+    assert detail.status_code == 200
+    data = detail.json()
+    assert "clip_embedding" not in data
+    assert data["photo_id"] == photo_id
+
+
+def test_get_photo_normalizes_legacy_crop_urls(client_with_photos):
+    import db
+    import numpy as np
+
+    conn = db.get_db()
+    photo_id = conn.execute("SELECT photo_id FROM photos WHERE filename='2020-01-01.jpg'").fetchone()[0]
+    emb = np.ones(4, dtype=np.float32).tobytes()
+    conn.execute(
+        "INSERT INTO clusters (cluster_id, person_label, face_count, is_noise, approved) VALUES (1, 'Alice', 1, 0, 1)"
+    )
+    conn.execute(
+        """INSERT INTO faces (photo_id, bbox_json, embedding, detection_score, cluster_id, crop_path)
+           VALUES (?, '[]', ?, 0.9, 1, ?)""",
+        (photo_id, emb, "/local/rimrock/photos/crops/face_a_0.jpg"),
+    )
+    conn.execute(
+        """INSERT INTO detections (photo_id, model, tag, confidence, bbox_json, crop_path, approved, created_at)
+           VALUES (?, 'clip', 'dog', 0.8, '[]', ?, 1, '2026-01-01T00:00:00+00:00')""",
+        (photo_id, "crops/dog_0.jpg"),
+    )
+    conn.commit()
+    conn.close()
+
+    detail = client_with_photos.get(f"/api/photos/{photo_id}")
+    assert detail.status_code == 200
+    data = detail.json()
+    assert data["faces"][0]["crop_url"] == "/crops/face_a_0.jpg"
+    assert data["detections"][0]["crop_url"] == "/crops/dog_0.jpg"
+
+
 def test_get_photo_404(client):
     resp = client.get("/api/photos/99999")
     assert resp.status_code == 404
+
+
+def test_static_file_routes_block_path_traversal(client, tmp_path):
+    import config
+
+    config.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    (config.OUTPUT_DIR / "safe.txt").write_text("ok", encoding="utf-8")
+    (tmp_path / "secret.txt").write_text("nope", encoding="utf-8")
+
+    ok = client.get("/organized/safe.txt")
+    blocked = client.get("/organized/%2E%2E/secret.txt")
+
+    assert ok.status_code == 200
+    assert blocked.status_code == 404
+
+
+def test_photo_filters_return_distinct_people_and_photo_counts(client_with_photos):
+    import db
+    import numpy as np
+
+    conn = db.get_db()
+    photo_ids = {
+        row["filename"]: row["photo_id"]
+        for row in conn.execute("SELECT photo_id, filename FROM photos").fetchall()
+    }
+    emb = np.ones(4, dtype=np.float32).tobytes()
+
+    conn.execute(
+        "INSERT INTO clusters (cluster_id, person_label, face_count, is_noise, approved) VALUES (1, 'Alice', 2, 0, 1)"
+    )
+    conn.execute(
+        "INSERT INTO clusters (cluster_id, person_label, face_count, is_noise, approved) VALUES (2, 'Alice', 1, 0, 1)"
+    )
+    conn.execute(
+        "INSERT INTO clusters (cluster_id, person_label, face_count, is_noise, approved) VALUES (3, 'Bob', 1, 0, 1)"
+    )
+    conn.execute(
+        "INSERT INTO clusters (cluster_id, person_label, face_count, is_noise, approved) VALUES (4, 'Noise', 1, 1, 1)"
+    )
+    conn.execute(
+        """INSERT INTO faces (photo_id, bbox_json, embedding, detection_score, cluster_id, crop_path)
+           VALUES (?, '[]', ?, 0.9, 1, 'crops/a1.jpg')""",
+        (photo_ids["2020-01-01.jpg"], emb),
+    )
+    conn.execute(
+        """INSERT INTO faces (photo_id, bbox_json, embedding, detection_score, cluster_id, crop_path)
+           VALUES (?, '[]', ?, 0.9, 2, 'crops/a2.jpg')""",
+        (photo_ids["2021-06-15.jpg"], emb),
+    )
+    conn.execute(
+        """INSERT INTO faces (photo_id, bbox_json, embedding, detection_score, cluster_id, crop_path)
+           VALUES (?, '[]', ?, 0.9, 3, 'crops/b1.jpg')""",
+        (photo_ids["2021-06-15.jpg"], emb),
+    )
+    conn.execute(
+        """INSERT INTO faces (photo_id, bbox_json, embedding, detection_score, cluster_id, crop_path)
+           VALUES (?, '[]', ?, 0.9, 4, 'crops/n1.jpg')""",
+        (photo_ids["undated.jpg"], emb),
+    )
+    conn.execute(
+        "INSERT INTO photo_tags (photo_id, tag, source) VALUES (?, 'dog', 'detection')",
+        (photo_ids["2020-01-01.jpg"],),
+    )
+    conn.execute(
+        "INSERT INTO photo_tags (photo_id, tag, source) VALUES (?, 'dog', 'detection')",
+        (photo_ids["2021-06-15.jpg"],),
+    )
+    conn.execute(
+        "INSERT INTO photo_tags (photo_id, tag, source) VALUES (?, 'cat', 'detection')",
+        (photo_ids["undated.jpg"],),
+    )
+    conn.commit()
+    conn.close()
+
+    resp = client_with_photos.get("/api/photo-filters")
+    assert resp.status_code == 200
+    data = resp.json()
+
+    assert data["people"] == [
+        {"person": "Alice", "photo_count": 2},
+        {"person": "Bob", "photo_count": 1},
+    ]
+    assert data["tags"] == [
+        {"tag": "cat", "photo_count": 1},
+        {"tag": "dog", "photo_count": 2},
+    ]

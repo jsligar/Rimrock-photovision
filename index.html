@@ -1,0 +1,401 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Rimrock Photo Tagger</title>
+  <link rel="stylesheet" href="/style.css?v=20260326c" />
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="control-rail">
+      <div class="rail-brand">
+        <div class="logo-mark" aria-hidden="true"></div>
+        <div class="logo-text">
+          <strong>RIMROCK</strong>
+          <span>PHOTO INTELLIGENCE</span>
+        </div>
+      </div>
+
+      <section class="rail-card rail-card--ticker">
+        <h3>Live Ticker</h3>
+        <div class="rail-ticker" id="sidebar-ticker">
+          <div class="rail-ticker-row"><span class="dim">Phase</span><strong id="ticker-phase">Idle</strong></div>
+          <div class="rail-ticker-row"><span class="dim">Progress</span><strong id="ticker-progress">-</strong></div>
+          <div class="rail-ticker-row"><span class="dim">Throughput</span><strong id="ticker-throughput">-</strong></div>
+        </div>
+      </section>
+
+      <section class="rail-card">
+        <h3>Session State</h3>
+        <div class="rail-stats">
+          <div class="rail-stat">
+            <span class="dim">Status</span>
+            <strong id="sidebar-status">READY</strong>
+          </div>
+          <div class="rail-stat">
+            <span class="dim">Running</span>
+            <strong id="sidebar-running-phase">-</strong>
+          </div>
+          <div class="rail-stat">
+            <span class="dim">Completed</span>
+            <strong id="sidebar-complete-count">0 / 8</strong>
+          </div>
+          <div class="rail-stat">
+            <span class="dim">Errors</span>
+            <strong id="sidebar-error-count">0</strong>
+          </div>
+          <div class="rail-stat">
+            <span class="dim">Active Tab</span>
+            <strong id="sidebar-active-tab">Dashboard</strong>
+          </div>
+        </div>
+      </section>
+
+      <section class="rail-card">
+        <h3>Background Load</h3>
+        <div class="rail-stats">
+          <div class="rail-stat">
+            <span class="dim">Machine</span>
+            <strong id="sidebar-machine-state">READY</strong>
+          </div>
+          <div class="rail-stat">
+            <span class="dim">Tasks</span>
+            <strong id="sidebar-background-count">0 running</strong>
+          </div>
+        </div>
+        <div class="bg-job-list" id="background-job-list">
+          <div class="bg-job bg-job--empty">No heavy background jobs</div>
+        </div>
+      </section>
+
+      <section class="rail-card rail-card--tips">
+        <h3>Shortcuts</h3>
+        <p><kbd>Ctrl+K</kbd> command palette</p>
+        <p><kbd>1..5</kbd> switch tabs</p>
+        <p><kbd>/</kbd> focus photo query</p>
+        <p><kbd>Esc</kbd> close overlay</p>
+      </section>
+    </aside>
+
+    <div class="workspace-shell">
+      <header class="topbar">
+        <div class="topbar__brand">
+          <div class="topbar__title-wrap">
+            <strong class="topbar__title">Operations Console</strong>
+            <span class="topbar__subtitle">Pipeline, review, and search in one flow</span>
+          </div>
+        </div>
+        <div class="topbar__actions">
+          <button class="btn" id="btn-command" title="Open command palette (Ctrl+K)">Command</button>
+          <div class="topbar__status mono dim" id="header-status">READY</div>
+        </div>
+      </header>
+
+      <nav class="tabs" aria-label="Primary">
+        <button class="tab-btn active" data-tab="dashboard">Dashboard</button>
+        <button class="tab-btn" data-tab="clusters">Cluster Review</button>
+        <button class="tab-btn" data-tab="objects">Objects &amp; Pets</button>
+        <button class="tab-btn" data-tab="photos">Photo Browser</button>
+        <button class="tab-btn" data-tab="settings">Settings</button>
+      </nav>
+
+      <main class="content-wrap">
+        <div id="tab-dashboard" class="tab-pane active">
+          <section class="panel panel--ghost">
+            <div id="phase-grid" class="phase-grid"></div>
+          </section>
+
+          <section class="panel panel--log">
+            <div class="panel-log-head">
+              <h3>Pipeline Log - last 50 lines</h3>
+              <button class="btn" id="btn-log-toggle" type="button">Expand</button>
+            </div>
+            <div class="log-lines" id="log-tail">Loading...</div>
+          </section>
+        </div>
+
+        <div id="tab-clusters" class="tab-pane">
+          <div class="split-layout split-layout--clusters">
+            <aside class="sidebar">
+              <div class="sidebar-header">Clusters <span id="cluster-progress" class="dim">-</span></div>
+              <div class="sidebar-list cluster-columns">
+                <section class="cluster-column">
+                  <div class="cluster-column-header">Tagged</div>
+                  <div id="cluster-list-tagged"></div>
+                </section>
+                <section class="cluster-column">
+                  <div class="cluster-column-header">Untagged</div>
+                  <div id="cluster-list-untagged"></div>
+                </section>
+              </div>
+            </aside>
+
+            <section class="main-pane">
+              <div class="pane-toolbar" id="cluster-toolbar" style="display:none;">
+                <input type="text" id="cluster-name-input" placeholder="Person name..." />
+                <button class="btn btn-accent" id="btn-approve-cluster">Approve</button>
+                <button class="btn" id="btn-untag-cluster">Untag</button>
+                <button class="btn btn-danger" id="btn-noise-cluster">Noise</button>
+                <select class="merge-select" id="merge-target">
+                  <option value="">Merge into...</option>
+                </select>
+                <button class="btn" id="btn-merge-cluster">Merge</button>
+                <select class="merge-select" id="reassign-target">
+                  <option value="">Move faces to cluster...</option>
+                </select>
+                <input type="text" id="reassign-name-input" placeholder="or type person name..." />
+                <button class="btn" id="btn-reassign-faces">Move Selected Faces</button>
+                <button class="btn" id="btn-undo-last-move">Undo Last Move</button>
+                <button class="btn" id="btn-select-all-faces">Select All</button>
+                <button class="btn" id="btn-clear-face-selection">Clear</button>
+                <span class="dim mono" id="face-selection-count">0 selected</span>
+                <span class="dim toolbar-tip">[Enter]=approve [U]=untag selected (or whole cluster if none selected) [N]=noise [Arrows]=nav [Shift+Click]=range select [Esc]=clear selection</span>
+              </div>
+              <div class="cluster-suggest-panel" id="cluster-suggestions">
+                <div class="dim">Suggestions loading...</div>
+              </div>
+              <div class="pane-scroll">
+                <div class="crop-grid" id="crop-grid">
+                  <div class="empty-state">Select a cluster to review</div>
+                </div>
+              </div>
+            </section>
+          </div>
+        </div>
+
+        <div id="tab-objects" class="tab-pane">
+          <div class="split-layout">
+            <aside class="sidebar">
+              <div class="sidebar-header">Tags</div>
+              <div class="sidebar-list tag-browser-list" id="tag-list">
+                <div class="empty-state">Loading tags...</div>
+              </div>
+              <div class="sidebar-footer">
+                <button class="btn" id="btn-vocab-manager">Manage Vocabulary</button>
+              </div>
+            </aside>
+
+            <section class="main-pane">
+              <div class="pane-toolbar">
+                <span id="obj-tag-title" class="accent mono">Select a tag</span>
+                <span id="obj-count" class="dim"></span>
+              </div>
+              <div class="pane-scroll">
+                <div class="photo-grid" id="obj-photo-grid"></div>
+                <div class="pagination" id="obj-pagination"></div>
+              </div>
+            </section>
+          </div>
+
+          <section id="vocab-panel" class="panel" style="display:none; margin-top:16px;">
+            <div class="vocab-head">
+              <h3 class="accent mono">VOCABULARY MANAGER</h3>
+              <div class="vocab-head-actions">
+                <span class="note">Changes apply on next Process phase run</span>
+                <button class="btn" id="btn-vocab-close">Close</button>
+              </div>
+            </div>
+
+            <table class="vocab-table">
+              <thead>
+                <tr>
+                  <th>Group</th><th>Tag Name</th><th>Prompts</th><th>Enabled</th><th></th>
+                </tr>
+              </thead>
+              <tbody id="vocab-tbody"></tbody>
+              <tfoot>
+                <tr>
+                  <td><input type="text" id="new-vocab-group" placeholder="group" class="vocab-input" /></td>
+                  <td><input type="text" id="new-vocab-name" placeholder="tag name" class="vocab-input" /></td>
+                  <td><textarea id="new-vocab-prompts" placeholder="one prompt per line" rows="2" class="vocab-textarea"></textarea></td>
+                  <td><input type="checkbox" id="new-vocab-enabled" checked /></td>
+                  <td><button class="btn btn-accent" id="btn-add-vocab">Add Tag</button></td>
+                </tr>
+              </tfoot>
+            </table>
+          </section>
+        </div>
+
+        <div id="tab-photos" class="tab-pane">
+          <section class="panel">
+            <div class="semantic-search" id="semantic-search-bar" style="display:none">
+              <input type="text" id="search-input"
+                     placeholder="Describe what you're looking for... e.g. 'sunset with dog'" />
+              <button class="btn btn-accent" id="btn-search">Search</button>
+              <button class="btn btn-ghost" id="btn-search-clear" style="display:none">Clear</button>
+              <select id="search-saved" style="display:none">
+                <option value="">Saved searches...</option>
+              </select>
+              <button class="btn btn-ghost" id="btn-search-save" style="display:none" title="Save current search">Save</button>
+              <span id="search-result-count" class="mono dim"></span>
+            </div>
+            <div class="quick-search">
+              <input
+                type="text"
+                id="quick-search"
+                placeholder="Quick search: person:Alice tag:dog year:2021 month:06 undated"
+              />
+              <button class="btn" id="btn-quick-search">Apply Query</button>
+            </div>
+            <div class="filter-bar">
+              <select id="filter-person"><option value="">All People</option></select>
+              <select id="filter-tag"><option value="">All Tags</option></select>
+              <select id="filter-year"><option value="">All Years</option></select>
+              <select id="filter-month"><option value="">All Months</option></select>
+              <label class="filter-check">
+                <input type="checkbox" id="filter-undated" />
+                Undated only
+              </label>
+              <button class="btn" id="btn-apply-filters">Apply</button>
+              <span id="photo-count" class="mono dim filter-count"></span>
+            </div>
+            <div class="photos-layout">
+              <aside class="search-facets" id="search-facets" style="display:none">
+                <h4 class="facet-heading">Refine Results</h4>
+                <div class="facet-group" id="facet-people">
+                  <h5>People</h5>
+                </div>
+                <div class="facet-group" id="facet-tags">
+                  <h5>Tags</h5>
+                </div>
+                <div class="facet-group" id="facet-years">
+                  <h5>Years</h5>
+                </div>
+              </aside>
+              <div class="photos-main">
+                <div class="photo-grid" id="photo-grid"></div>
+                <div class="pagination" id="photo-pagination"></div>
+              </div>
+            </div>
+          </section>
+        </div>
+
+        <div id="tab-settings" class="tab-pane">
+          <div class="settings-grid">
+            <section class="settings-card">
+              <h3>Paths</h3>
+              <div class="field-group">
+                <label>NAS Source Directory</label>
+                <input type="text" id="s-nas-dir" />
+              </div>
+              <div class="field-group">
+                <label>Local Base Directory</label>
+                <input type="text" id="s-local-base" />
+              </div>
+            </section>
+
+            <section class="settings-card">
+              <h3>Detection</h3>
+              <div class="field-group">
+                <div class="slider-head">
+                  <label>YOLO Confidence</label>
+                  <span class="slider-val" id="v-yolo-conf"></span>
+                </div>
+                <input type="range" id="s-yolo-conf" min="0.10" max="0.95" step="0.01" />
+                <p class="field-hint">Minimum confidence for object detections. Higher = fewer but more accurate detections.</p>
+              </div>
+              <div class="field-group">
+                <div class="slider-head">
+                  <label>CLIP Similarity</label>
+                  <span class="slider-val" id="v-clip-thresh"></span>
+                </div>
+                <input type="range" id="s-clip-thresh" min="0.10" max="0.50" step="0.01" />
+                <p class="field-hint">Minimum CLIP score to apply a scene/object tag. Lower = more tags but more false positives.</p>
+              </div>
+              <div class="field-group">
+                <div class="slider-head">
+                  <label>Max Inference Dimension</label>
+                  <span class="slider-val" id="v-max-dim"></span>
+                </div>
+                <input type="range" id="s-max-dim" min="640" max="3840" step="64" />
+                <p class="field-hint">Photos are resized to this max edge length before inference. Lower = faster but less detail.</p>
+              </div>
+            </section>
+
+            <section class="settings-card">
+              <h3>Face Clustering</h3>
+              <div class="field-group">
+                <div class="slider-head">
+                  <label>Face Detection Threshold</label>
+                  <span class="slider-val" id="v-det-thresh"></span>
+                </div>
+                <input type="range" id="s-det-thresh" min="0.10" max="0.90" step="0.01" />
+                <p class="field-hint">InsightFace detection confidence. Lower finds more faces but picks up more false positives.</p>
+              </div>
+              <div class="field-group">
+                <div class="slider-head">
+                  <label>UMAP Neighbors</label>
+                  <span class="slider-val" id="v-umap-neighbors"></span>
+                </div>
+                <input type="range" id="s-umap-neighbors" min="5" max="100" step="1" />
+                <p class="field-hint">How many nearby faces UMAP considers when reducing dimensions. Higher = broader groupings, lower = tighter local structure.</p>
+              </div>
+              <div class="field-group">
+                <div class="slider-head">
+                  <label>Min Cluster Size</label>
+                  <span class="slider-val" id="v-hdbscan-min-cluster"></span>
+                </div>
+                <input type="range" id="s-hdbscan-min-cluster" min="2" max="25" step="1" />
+                <p class="field-hint">Smallest group HDBSCAN will form into a cluster. Higher = fewer clusters with more faces each. Lower = catches rare faces but creates more noise.</p>
+              </div>
+              <div class="field-group">
+                <div class="slider-head">
+                  <label>Min Samples</label>
+                  <span class="slider-val" id="v-hdbscan-min-samples"></span>
+                </div>
+                <input type="range" id="s-hdbscan-min-samples" min="1" max="15" step="1" />
+                <p class="field-hint">How conservative HDBSCAN is about core points. Higher = denser clusters with more outliers marked as noise.</p>
+              </div>
+            </section>
+
+            <section class="settings-card settings-card--wide">
+              <div class="settings-head">
+                <h3>System Stats</h3>
+                <div class="settings-actions">
+                  <button class="btn btn-accent" id="btn-save-settings">Save Settings</button>
+                  <button class="btn btn-danger" id="btn-clear-db">Clear DB</button>
+                </div>
+              </div>
+              <p class="field-hint settings-danger-hint">Clear DB permanently removes indexed photos, faces, clusters, and detections. Use only for a full reset.</p>
+              <div id="stats-rows"></div>
+            </section>
+          </div>
+        </div>
+      </main>
+
+      <footer class="workspace-footer">
+        <span class="mono dim">Pilot Mode</span>
+        <span class="dim">Use command deck to run phases and jump tabs quickly</span>
+      </footer>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="photo-modal">
+    <div class="modal">
+      <div class="modal-header">
+        <span id="modal-filename" class="mono">-</span>
+        <button class="modal-close" id="modal-close">x</button>
+      </div>
+      <div class="modal-body">
+        <div class="modal-canvas-wrap">
+          <canvas id="modal-canvas" width="560" height="420"></canvas>
+        </div>
+        <div class="modal-info" id="modal-info"></div>
+      </div>
+    </div>
+  </div>
+  <div class="palette-overlay" id="command-palette">
+    <div class="palette" role="dialog" aria-modal="true" aria-label="Command Palette">
+      <div class="palette-head">
+        <input type="text" id="cmd-input" placeholder="Type a command (tab:, run:, query: ...)" />
+      </div>
+      <div class="palette-list" id="cmd-results"></div>
+      <div class="palette-hint" id="cmd-hint">Shortcuts: Ctrl+K open, 1-5 switch tab, / focus quick search, Esc close</div>
+    </div>
+  </div>
+  <div id="toast-root" class="toast-root" aria-live="polite" aria-atomic="true"></div>
+
+  <script src="/app.js?v=20260326c"></script>
+</body>
+</html>

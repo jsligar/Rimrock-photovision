@@ -1,5 +1,7 @@
 """Tests for GET /api/status endpoint."""
 
+from datetime import datetime, timedelta, timezone
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -16,9 +18,11 @@ def test_status_returns_all_phases(client):
     assert resp.status_code == 200
     data = resp.json()
     assert "phases" in data
+    assert "background_jobs" in data
     assert "counts" in data
     phases = [p["phase"] for p in data["phases"]]
     assert phases == ["preflight", "pull", "process", "cluster", "organize", "tag", "push", "verify"]
+    assert data["background_jobs"] == []
 
 
 def test_status_all_pending_initially(client):
@@ -39,3 +43,109 @@ def test_status_counts_zero_initially(client):
     assert counts["approved_clusters"] == 0
     assert counts["total_detections"] == 0
     assert counts["photos_organized"] == 0
+
+
+def test_status_includes_running_background_jobs(client):
+    import db
+
+    db.mark_background_job_running("ocr_backfill", total=50, detail="Search indexing (OCR)")
+    db.update_background_job_progress("ocr_backfill", 12, total=50, detail="Search indexing (OCR)")
+
+    resp = client.get("/api/status")
+    assert resp.status_code == 200
+    data = resp.json()
+
+    assert data["background_jobs"] == [
+        {
+            "job_name": "ocr_backfill",
+            "status": "running",
+            "progress_current": 12,
+            "progress_total": 50,
+            "started_at": data["background_jobs"][0]["started_at"],
+            "updated_at": data["background_jobs"][0]["updated_at"],
+            "completed_at": None,
+            "error_message": None,
+            "detail": "Search indexing (OCR)",
+        }
+    ]
+
+
+def test_status_marks_stale_background_jobs_as_error(client):
+    import db
+
+    db.mark_background_job_running("ocr_backfill", total=50, detail="Search indexing (OCR)")
+
+    stale_at = (datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat()
+    conn = db.get_db()
+    conn.execute(
+        "UPDATE background_jobs SET started_at=?, updated_at=? WHERE job_name='ocr_backfill'",
+        (stale_at, stale_at),
+    )
+    conn.commit()
+    conn.close()
+
+    resp = client.get("/api/status")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["background_jobs"][0]["job_name"] == "ocr_backfill"
+    assert data["background_jobs"][0]["status"] == "error"
+    assert "stale" in data["background_jobs"][0]["error_message"].lower()
+
+
+def test_status_marks_downstream_phases_stale_when_upstream_reruns(client):
+    import db
+
+    for phase in ("cluster", "tag", "push", "verify"):
+        db.mark_phase_running(phase)
+        db.mark_phase_complete(phase)
+
+    conn = db.get_db()
+    conn.execute(
+        """
+        UPDATE pipeline_state
+           SET completed_at=?
+         WHERE phase='tag'
+        """,
+        ("2026-03-26T10:00:00+00:00",),
+    )
+    conn.execute(
+        """
+        UPDATE pipeline_state
+           SET completed_at=?
+         WHERE phase='push'
+        """,
+        ("2026-03-26T10:05:00+00:00",),
+    )
+    conn.execute(
+        """
+        UPDATE pipeline_state
+           SET completed_at=?
+         WHERE phase='verify'
+        """,
+        ("2026-03-26T10:10:00+00:00",),
+    )
+    conn.execute(
+        """
+        UPDATE pipeline_state
+           SET completed_at=?
+         WHERE phase='cluster'
+        """,
+        ("2026-03-26T11:00:00+00:00",),
+    )
+    conn.commit()
+    conn.close()
+
+    resp = client.get("/api/status")
+    assert resp.status_code == 200
+    data = resp.json()
+    phase_map = {phase["phase"]: phase for phase in data["phases"]}
+
+    assert phase_map["cluster"]["status"] == "complete"
+    assert phase_map["tag"]["status"] == "pending"
+    assert phase_map["tag"]["raw_status"] == "complete"
+    assert phase_map["tag"]["is_stale"] is True
+    assert "rerun tag" in phase_map["tag"]["stale_reason"].lower()
+    assert phase_map["push"]["status"] == "pending"
+    assert phase_map["push"]["is_stale"] is True
+    assert phase_map["verify"]["status"] == "pending"
+    assert phase_map["verify"]["is_stale"] is True

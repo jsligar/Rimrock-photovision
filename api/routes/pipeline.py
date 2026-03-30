@@ -42,6 +42,9 @@ def _phase_runner(phase: str) -> None:
         elif phase == "verify":
             from pipeline.phase7_verify import run_verify
             run_verify()
+        elif phase == "ocr":
+            from pipeline.phase_ocr_documents import run_ocr_documents
+            run_ocr_documents()
         else:
             db.mark_phase_error(phase, f"Unknown phase: {phase}")
     except Exception as e:
@@ -55,7 +58,7 @@ def _phase_runner(phase: str) -> None:
 def run_phase(phase: str):
     global _running_thread, _running_phase
 
-    valid_phases = ['preflight', 'pull', 'process', 'cluster', 'organize', 'tag', 'push', 'verify']
+    valid_phases = ['preflight', 'pull', 'process', 'cluster', 'organize', 'tag', 'push', 'verify', 'ocr']
     if phase not in valid_phases:
         raise HTTPException(status_code=400, detail=f"Unknown phase: {phase}")
 
@@ -82,6 +85,48 @@ def stop_pipeline():
     """Request graceful shutdown of the running phase."""
     shutdown.request()
     return {"requested": "stop"}
+
+
+_PHASE_ORDER = [
+    "preflight", "pull", "process", "cluster", "organize", "tag", "push", "verify"
+]
+
+
+def _downstream_phases(phase: str) -> list[str]:
+    """Return all phases that come after `phase` in pipeline order."""
+    try:
+        idx = _PHASE_ORDER.index(phase)
+    except ValueError:
+        return []
+    return _PHASE_ORDER[idx + 1:]
+
+
+@router.post("/pipeline/reset/{phase}")
+def reset_phase(phase: str, cascade: bool = True):
+    """
+    Reset a phase to 'pending'. By default also resets all downstream phases.
+
+    Pass ?cascade=false to reset only the named phase.
+    Refuses if the target phase or any cascade target is currently running —
+    stop it first with POST /api/pipeline/stop.
+    """
+    if phase not in _PHASE_ORDER:
+        raise HTTPException(status_code=400, detail=f"Unknown phase: {phase}")
+
+    phases_to_reset = [phase] + (_downstream_phases(phase) if cascade else [])
+
+    with _lock:
+        if _running_thread and _running_thread.is_alive() and _running_phase in phases_to_reset:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Cannot reset: phase '{_running_phase}' is currently running. "
+                    "Stop it first with POST /api/pipeline/stop."
+                ),
+            )
+
+    db.reset_phase_state(phases_to_reset)
+    return {"reset": phases_to_reset, "cascade": cascade}
 
 
 @router.get("/pipeline/log-tail")

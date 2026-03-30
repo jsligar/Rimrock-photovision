@@ -5,3 +5,21 @@ __pycache__/
 *.db
 *.log
 .env
+.env.*
+
+# Model binaries — too large for git, managed locally on device
+*.engine
+*.onnx
+*.pt
+*.gguf
+*.bin
+
+# Claude Code internals
+.claude/
+
+# Codex backup artifacts
+.codex-backups/
+.codex_backups/
+
+# Web build artifacts
+web/figma/

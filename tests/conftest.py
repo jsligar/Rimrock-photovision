@@ -20,7 +20,14 @@ def tmp_db(tmp_path, monkeypatch):
     monkeypatch.setattr("config.LOCAL_BASE", tmp_path)
     monkeypatch.setattr("config.ORIGINALS_DIR", tmp_path / "originals")
     monkeypatch.setattr("config.CROPS_DIR", tmp_path / "crops")
+    monkeypatch.setattr("config.OUTPUT_DIR", tmp_path / "organized")
+    monkeypatch.setattr("config.PERSON_MEMORY_PATH", tmp_path / "person_memory.json")
+    monkeypatch.setattr("config.BATCH_MANIFEST_PATH", None)
     monkeypatch.setattr("config.UNDATED_DIR", "undated")
+    monkeypatch.setattr("config.LOG_PATH", tmp_path / "rimrock_photos.log")
+    monkeypatch.setattr("config.RSYNC_PULL_LOG", tmp_path / "rsync_pull.log")
+    monkeypatch.setattr("config.RSYNC_PUSH_LOG", tmp_path / "rsync_push.log")
+    monkeypatch.setattr("config.PREFILTER_REJECTS_PATH", tmp_path / "prefilter_rejects.tsv")
 
     import db as db_module
     db_module.init_db()
