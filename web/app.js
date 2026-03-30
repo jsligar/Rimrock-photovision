@@ -34,6 +34,8 @@ const state = {
   prototypeScopeClusterId: null,
   personReviewData: null,
   selectedFaceIds: new Set(),
+  clusterSuggestions: {},
+  clusterLabelDrafts: {},
   reviewSidebarCollapsed: {
     people: false,
     clusters: false,
@@ -415,6 +417,35 @@ function currentReviewSelection() {
   return (state.reviewFaces || []).filter(face => state.selectedFaceIds.has(face.face_id));
 }
 
+function clusterLabelValue(cluster) {
+  if (!cluster) {
+    return '';
+  }
+  if (Object.prototype.hasOwnProperty.call(state.clusterLabelDrafts, cluster.cluster_id)) {
+    return state.clusterLabelDrafts[cluster.cluster_id];
+  }
+  return cluster.person_label || '';
+}
+
+function clusterSuggestionState(clusterId) {
+  return clusterId ? state.clusterSuggestions[clusterId] || null : null;
+}
+
+function maybeAutofillClusterLabel(clusterId) {
+  const cluster = state.clusters.find(item => item.cluster_id === clusterId);
+  if (!cluster || cluster.person_label) {
+    return;
+  }
+  const existing = String(state.clusterLabelDrafts[clusterId] || '').trim();
+  if (existing) {
+    return;
+  }
+  const suggestions = clusterSuggestionState(clusterId)?.suggestions || [];
+  if (suggestions.length) {
+    state.clusterLabelDrafts[clusterId] = suggestions[0].person_label;
+  }
+}
+
 function queueClusters() {
   return state.clusters.filter(cluster => !cluster.person_label && !cluster.is_noise);
 }
@@ -614,6 +645,54 @@ function renderReviewControls(cluster) {
   renderSelectionCaption();
 }
 
+function renderClusterSuggestions(cluster) {
+  const container = el('cluster-suggestions');
+  if (!container) {
+    return;
+  }
+  if (!cluster || isPrototypeMode() || isPersonMode()) {
+    container.hidden = true;
+    container.innerHTML = '';
+    return;
+  }
+
+  container.hidden = false;
+  const suggestionState = clusterSuggestionState(cluster.cluster_id);
+  if (!suggestionState || suggestionState.loading) {
+    container.innerHTML = '<div class="suggestion-caption">Loading top matches...</div>';
+    return;
+  }
+  if (suggestionState.error) {
+    container.innerHTML = `<div class="suggestion-caption">${escHtml(suggestionState.error)}</div>`;
+    return;
+  }
+  if (!Array.isArray(suggestionState.suggestions) || !suggestionState.suggestions.length) {
+    const reason = suggestionState.reason ? ` (${String(suggestionState.reason).replace(/_/g, ' ')})` : '';
+    container.innerHTML = `<div class="suggestion-caption">No suggestion matches available${escHtml(reason)}.</div>`;
+    return;
+  }
+
+  const note = suggestionState.source_pool === 'approved_plus_labeled'
+    ? '<div class="suggestion-caption">Top three matches include pending labels to widen the candidate pool.</div>'
+    : '<div class="suggestion-caption">Top three likely matches. Click one to label and approve the cluster in one step.</div>';
+  const cards = suggestionState.suggestions.slice(0, 3).map(suggestion => {
+    const score = Number(suggestion.score || 0).toFixed(2);
+    const support = fmtNumber(suggestion.support_faces || 0);
+    const actionLabel = suggestion.recommended ? 'Approve Match' : 'Approve As';
+    return `
+      <article class="suggestion-card ${suggestion.recommended ? 'recommended' : ''}">
+        <div class="suggestion-name">${escHtml(suggestion.person_label)}</div>
+        <div class="suggestion-meta">score ${score} | ${support} support faces</div>
+        <div class="suggestion-meta">source cluster ${fmtNumber(suggestion.source_cluster_id)} | ${suggestion.source_approved ? 'approved' : 'pending'}</div>
+        <button class="btn btn-small ${suggestion.recommended ? 'btn-primary' : ''}" data-approve-suggestion="${escHtml(suggestion.person_label)}" type="button">
+          ${actionLabel}
+        </button>
+      </article>
+    `;
+  }).join('');
+  container.innerHTML = `${note}<div class="suggestion-row">${cards}</div>`;
+}
+
 function reviewFaceScoreLine(face) {
   if (isPersonMode()) {
     return `match ${Number(face.match_score || 0).toFixed(2)} | det ${Number(face.detection_score || 0).toFixed(2)}`;
@@ -668,6 +747,7 @@ function renderSelectedCluster() {
     el('cluster-priority-strip').innerHTML = '';
     el('cluster-crops').innerHTML = '<div class="empty-state">Select a cluster to review.</div>';
     renderReviewControls(null);
+    renderClusterSuggestions(null);
     return;
   }
 
@@ -687,6 +767,7 @@ function renderSelectedCluster() {
       <span class="priority-pill">${prototypeGroup ? `${fmtNumber(prototypeGroup.prototype_support_faces || 0)} support faces` : 'Select a group'}</span>
     `;
     renderReviewControls(cluster);
+    renderClusterSuggestions(null);
     renderReviewFaces();
     return;
   }
@@ -708,6 +789,7 @@ function renderSelectedCluster() {
       <span class="priority-pill">${state.personReviewData?.usable_label ? 'Usable label' : 'Thin support'}</span>
     `;
     renderReviewControls(cluster || { person_label: personLabel });
+    renderClusterSuggestions(null);
     renderReviewFaces();
     return;
   }
@@ -717,13 +799,14 @@ function renderSelectedCluster() {
   el('review-grid-title').textContent = 'Cluster Faces';
   el('cluster-detail-title').textContent = clusterDisplayName(cluster);
   el('cluster-detail-meta').textContent = `${fmtNumber(cluster.face_count)} faces | ${cluster.review_state || 'pending'}`;
-  el('cluster-label-input').value = cluster.person_label || '';
+  el('cluster-label-input').value = clusterLabelValue(cluster);
   el('cluster-priority-strip').innerHTML = `
     <span class="priority-pill ${escHtml(cluster.review_priority_bucket || 'low')}">Priority ${escHtml(cluster.review_priority_bucket || 'low')}</span>
     <span class="priority-pill">Rank ${fmtNumber(cluster.review_priority_rank || 0)}</span>
     <span class="priority-pill">Score ${cluster.review_priority_score ?? '-'}</span>
   `;
   renderReviewControls(cluster);
+  renderClusterSuggestions(cluster);
   renderReviewFaces();
 }
 
@@ -808,6 +891,13 @@ async function loadClusters() {
     state.personFiles = buildPersonFiles(state.clusters);
     if (state.selectedClusterId && !state.clusters.some(item => item.cluster_id === state.selectedClusterId)) {
       state.selectedClusterId = null;
+    }
+    if (
+      state.reviewMode === 'cluster' &&
+      state.selectedClusterId &&
+      state.clusters.some(item => item.cluster_id === state.selectedClusterId && item.person_label && !item.is_noise)
+    ) {
+      state.selectedClusterId = firstQueueClusterId();
     }
     if (!state.selectedClusterId && state.clusters.length) {
       state.selectedClusterId = firstQueueClusterId();
@@ -910,12 +1000,35 @@ async function loadPrototypeGroups() {
 async function loadClusterCrops(clusterId) {
   state.reviewFaces = null;
   state.personReviewData = null;
+  if (clusterId) {
+    loadClusterSuggestions(clusterId);
+  }
   renderSelectedCluster();
   try {
     state.reviewFaces = await api(`/clusters/${clusterId}/crops`);
     renderSelectedCluster();
   } catch (error) {
     el('cluster-crops').innerHTML = `<div class="empty-state">${escHtml(error.message)}</div>`;
+  }
+}
+
+async function loadClusterSuggestions(clusterId) {
+  state.clusterSuggestions[clusterId] = { loading: true, suggestions: [] };
+  if (state.selectedClusterId === clusterId && !isPrototypeMode() && !isPersonMode()) {
+    renderClusterSuggestions(selectedCluster());
+  }
+  try {
+    const data = await api(`/clusters/${clusterId}/suggestions`);
+    state.clusterSuggestions[clusterId] = data;
+    maybeAutofillClusterLabel(clusterId);
+    if (state.selectedClusterId === clusterId && !isPrototypeMode() && !isPersonMode()) {
+      renderSelectedCluster();
+    }
+  } catch (error) {
+    state.clusterSuggestions[clusterId] = { error: error.message, suggestions: [] };
+    if (state.selectedClusterId === clusterId && !isPrototypeMode() && !isPersonMode()) {
+      renderClusterSuggestions(selectedCluster());
+    }
   }
 }
 
@@ -1279,6 +1392,24 @@ async function approveCluster() {
   }
 }
 
+async function approveSuggestedCluster(personLabel) {
+  const cluster = selectedCluster();
+  if (!cluster || !personLabel) {
+    return;
+  }
+  try {
+    state.clusterLabelDrafts[cluster.cluster_id] = personLabel;
+    await apiPost(`/clusters/${cluster.cluster_id}/accept-suggestion`, { person_label: personLabel });
+    await apiPost(`/clusters/${cluster.cluster_id}/approve`);
+    state.selectedClusterId = null;
+    showToast(`Approved cluster as ${personLabel}.`, 'ok');
+    await loadClusters();
+    await refreshStatus();
+  } catch (error) {
+    showToast(error.message, 'err');
+  }
+}
+
 async function untagCluster() {
   if (!state.selectedClusterId) {
     return;
@@ -1436,6 +1567,8 @@ async function clearDatabase() {
     state.selectedPersonClusterId = null;
     state.reviewFaces = [];
     state.personFiles = [];
+    state.clusterSuggestions = {};
+    state.clusterLabelDrafts = {};
     state.prototypeGroups = [];
     state.selectedPrototypeLabel = null;
     state.personReviewData = null;
@@ -1534,6 +1667,20 @@ function bindEvents() {
   el('btn-cluster-approve').addEventListener('click', () => approveCluster());
   el('btn-cluster-untag').addEventListener('click', () => untagCluster());
   el('btn-cluster-noise').addEventListener('click', () => markClusterNoise());
+  el('cluster-label-input').addEventListener('input', event => {
+    const cluster = selectedCluster();
+    if (!cluster || isPrototypeMode() || isPersonMode()) {
+      return;
+    }
+    state.clusterLabelDrafts[cluster.cluster_id] = event.target.value;
+  });
+  el('cluster-suggestions').addEventListener('click', event => {
+    const button = event.target.closest('[data-approve-suggestion]');
+    if (!button) {
+      return;
+    }
+    approveSuggestedCluster(button.dataset.approveSuggestion || '');
+  });
   el('btn-review-whole-file').addEventListener('click', () => toggleWholeFileReview());
   el('btn-review-move-selected').addEventListener('click', () => moveSelectedFaces());
   el('btn-review-remove-selected').addEventListener('click', () => removeSelectedPersonFace());

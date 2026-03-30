@@ -634,12 +634,65 @@ h3 {
 }
 
 .detail-grid {
+  display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: end;
+  gap: 12px;
 }
 
 .detail-grid--secondary {
   margin-top: 14px;
+}
+
+.cluster-suggestions {
+  display: grid;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.cluster-suggestions[hidden] {
+  display: none;
+}
+
+.suggestion-caption {
+  color: var(--ink-soft);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.suggestion-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+}
+
+.suggestion-card {
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.62);
+  padding: 12px;
+  display: grid;
+  gap: 8px;
+}
+
+.suggestion-card.recommended {
+  border-color: rgba(44, 122, 82, 0.3);
+  background: rgba(44, 122, 82, 0.08);
+}
+
+.suggestion-name {
+  font-weight: 700;
+}
+
+.suggestion-meta {
+  color: var(--ink-soft);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.suggestion-card .btn {
+  width: 100%;
+  justify-content: center;
 }
 
 .field {
